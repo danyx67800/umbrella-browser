@@ -1,0 +1,72 @@
+{
+  "name": "umbrella-browser",
+  "version": "0.3.1",
+  "private": true,
+  "description": "Umbrella — a minimal, privacy-conscious Chromium desktop browser with custom wallpapers, Chrome-compatible extensions and integrated ad blocking.",
+  "main": "./out/main/index.js",
+  "author": "Umbrella",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=22.12.0",
+    "npm": ">=10.0.0"
+  },
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "dist": "npm run build && electron-builder --win nsis portable --x64"
+  },
+  "dependencies": {
+    "lucide-react": "^1.78.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "@ghostery/adblocker-electron": "^2.20.3",
+    "cross-fetch": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "electron": "^45.4.1",
+    "electron-builder": "^26.18.1",
+    "electron-vite": "^6.0.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8"
+  },
+  "build": {
+    "appId": "com.umbrella.browser",
+    "productName": "Umbrella",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/umbrella.ico",
+        "to": "umbrella.ico"
+      }
+    ],
+    "asar": true,
+    "win": {
+      "icon": "resources/umbrella.ico",
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "portable": {
+      "artifactName": "Umbrella-${version}-portable.${ext}"
+    }
+  }
+}

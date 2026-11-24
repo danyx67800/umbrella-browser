@@ -1,0 +1,79 @@
+:root {
+  color-scheme: dark;
+  --bg-canvas: #11131b;
+  --bg-sidebar: #151925;
+  --bg-toolbar: #171c29;
+  --bg-surface: #1c2231;
+  --bg-surface-raised: #222a3a;
+  --bg-surface-hover: #293247;
+  --bg-input: #131927;
+  --border-subtle: rgba(151, 166, 206, .12);
+  --border-strong: rgba(151, 166, 206, .22);
+  --text-primary: #f1f4fc;
+  --text-secondary: #a0a9bd;
+  --text-muted: #6e788e;
+  --accent: #8299ff;
+  --accent-soft: rgba(130, 153, 255, .14);
+  --accent-border: rgba(130, 153, 255, .34);
+  --success: #6ed6ac;
+  --danger: #fa7c88;
+  --warning: #e6bc70;
+  --shadow-soft: 0 16px 42px rgba(0, 0, 0, .22);
+  --radius-xs: 6px;
+  --radius-sm: 9px;
+  --radius-md: 13px;
+  --radius-lg: 18px;
+  --radius-xl: 24px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --sidebar-width: 58px;
+  --toolbar-height: 48px;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg-canvas: #f2f4f9;
+  --bg-sidebar: #e9edf5;
+  --bg-toolbar: #f7f8fc;
+  --bg-surface: #ffffff;
+  --bg-surface-raised: #f5f7fc;
+  --bg-surface-hover: #e8edf8;
+  --bg-input: #eef1f8;
+  --border-subtle: rgba(45, 57, 86, .10);
+  --border-strong: rgba(45, 57, 86, .18);
+  --text-primary: #20263a;
+  --text-secondary: #59647b;
+  --text-muted: #78839a;
+  --accent-soft: rgba(93, 117, 229, .10);
+  --accent-border: rgba(93, 117, 229, .28);
+  --shadow-soft: 0 14px 40px rgba(52, 65, 94, .10);
+}
+
+@media (prefers-color-scheme: light) {
+  :root[data-theme="system"] {
+    color-scheme: light;
+    --bg-canvas: #f2f4f9;
+    --bg-sidebar: #e9edf5;
+    --bg-toolbar: #f7f8fc;
+    --bg-surface: #ffffff;
+    --bg-surface-raised: #f5f7fc;
+    --bg-surface-hover: #e8edf8;
+    --bg-input: #eef1f8;
+    --border-subtle: rgba(45, 57, 86, .10);
+    --border-strong: rgba(45, 57, 86, .18);
+    --text-primary: #20263a;
+    --text-secondary: #59647b;
+    --text-muted: #78839a;
+    --accent-soft: rgba(93, 117, 229, .10);
+    --accent-border: rgba(93, 117, 229, .28);
+    --shadow-soft: 0 14px 40px rgba(52, 65, 94, .10);
+  }
+}
