@@ -1,10 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { MapPin, Search, X } from 'lucide-react';
+import { Search, Shield, X } from 'lucide-react';
 import Sidebar from './components/Sidebar';
 import Toolbar from './components/Toolbar';
 import StartPage from './components/StartPage';
 import ManagerPanel from './components/ManagerPanel';
+import Onboarding from './components/Onboarding';
+import BrowserImportDialog from './components/BrowserImportDialog';
+import SitePrivacyPanel from './components/SitePrivacyPanel';
+import type { AppSettings } from '../electron/storage';
 import type { BrowserState, TabInfo } from '../electron/preload';
+import type { SitePermissionName } from '../electron/storage';
 import type { PermissionRequest } from '../electron/preload';
 
 type Panel = 'home' | 'bookmarks' | 'history' | 'downloads' | 'extensions' | 'settings';
@@ -17,12 +22,17 @@ export default function App() {
   const [findOpen, setFindOpen] = useState(false);
   const [findQuery, setFindQuery] = useState('');
   const [permissionRequest, setPermissionRequest] = useState<PermissionRequest | null>(null);
+  const [privacyOpen, setPrivacyOpen] = useState(false);
+  const [browserImportOpen, setBrowserImportOpen] = useState(false);
+  const [importFeedback, setImportFeedback] = useState('');
   const pageHostRef = useRef<HTMLDivElement>(null);
 
   const tabs = state?.tabs ?? [];
   const activeTab = useMemo<TabInfo | null>(() => tabs.find((tab) => tab.id === state?.activeTabId) ?? null, [tabs, state?.activeTabId]);
   const isBookmarked = !!activeTab?.url && !!state?.bookmarks.some((bookmark) => bookmark.url === activeTab.url);
-  const showWebPage = panel === 'home' && !!activeTab && !activeTab.isNewTab;
+  const performanceMode = state?.settings.performanceModeEnabled ?? false;
+  const onboardingVisible = !!state && !state.settings.onboardingCompleted;
+  const showWebPage = !onboardingVisible && (panel === 'home' || performanceMode) && !!activeTab && !activeTab.isNewTab;
 
   useEffect(() => {
     void window.umbrella.getState().then(setState);
@@ -80,6 +90,18 @@ export default function App() {
   const switchTab = (id: string) => { setPanel('home'); void window.umbrella.switchTab(id); };
   const changePanel = (next: Panel) => setPanel(next);
   const updateSettings = (patch: Partial<BrowserState['settings']>) => { void window.umbrella.updateSettings(patch); };
+  const completeOnboarding = async (theme: AppSettings['theme']) => {
+    const settings = await window.umbrella.updateSettings({ theme, onboardingCompleted: true });
+    setState((current) => current ? { ...current, settings } : current);
+  };
+  const setSitePermission = (permission: SitePermissionName, allowed: boolean | null) => {
+    const origin = state?.sitePrivacy.origin;
+    return origin ? window.umbrella.setSitePermission(origin, permission, allowed) : Promise.resolve(false);
+  };
+  const setSiteAdBlockExcluded = (excluded: boolean) => {
+    const origin = state?.sitePrivacy.origin;
+    return origin ? window.umbrella.setSiteAdBlockExcluded(origin, excluded) : Promise.resolve(false);
+  };
 
   const runFind = (value: string) => {
     setFindQuery(value);
@@ -89,7 +111,7 @@ export default function App() {
   const closeFind = () => { setFindOpen(false); setFindQuery(''); void window.umbrella.stopFind(); };
 
   return (
-    <div className={`app-shell ${sidebarExpanded ? 'sidebar-wide' : ''}`}>
+    <div className={`app-shell ${sidebarExpanded ? 'sidebar-wide' : ''} ${performanceMode ? 'performance-mode' : ''}`}>
       <Toolbar
         activeTab={activeTab}
         extensions={state?.extensions ?? []}
@@ -106,6 +128,13 @@ export default function App() {
         onExtensions={() => setPanel('extensions')}
         onSettings={() => setPanel('settings')}
         onToggleSidebar={() => setSidebarExpanded((value) => !value)}
+        performanceMode={performanceMode}
+        sitePrivacyAvailable={!!state?.sitePrivacy.origin}
+        privacyOpen={privacyOpen}
+        onTogglePrivacy={() => setPrivacyOpen((open) => !open)}
+        onTogglePerformanceMode={() => {
+          if (state) updateSettings({ performanceModeEnabled: !performanceMode });
+        }}
       />
 
       <div className="browser-body">
@@ -113,7 +142,7 @@ export default function App() {
           tabs={tabs}
           activeTabId={state?.activeTabId ?? ''}
           panel={panel}
-          expanded={sidebarExpanded}
+          expanded={performanceMode || sidebarExpanded}
           onToggleExpanded={() => setSidebarExpanded((value) => !value)}
           onNewTab={newTab}
           onSwitchTab={switchTab}
@@ -125,7 +154,7 @@ export default function App() {
 
         <section className="main-shell">
           <div className={`workspace ${panel !== 'home' ? 'workspace-panel' : ''}`}>
-            {panel === 'home' && activeTab?.isNewTab && state && <StartPage
+            {!performanceMode && panel === 'home' && activeTab?.isNewTab && state && <StartPage
               bookmarks={state.bookmarks}
               wallpaperUrl={state.wallpaperUrl}
               onSearch={navigate}
@@ -133,7 +162,7 @@ export default function App() {
               onAddBookmark={(title, url) => void window.umbrella.addBookmark(title, url)}
               onSettings={() => setPanel('settings')}
             />}
-            {panel !== 'home' && state && <ManagerPanel
+            {!performanceMode && panel !== 'home' && state && <ManagerPanel
               panel={panel}
               state={state}
               onOpen={openUrl}
@@ -144,18 +173,31 @@ export default function App() {
               onAddExtension={() => window.umbrella.addExtension()}
               onSetExtensionEnabled={(id, enabled) => window.umbrella.setExtensionEnabled(id, enabled)}
               onRemoveExtension={(id) => window.umbrella.removeExtension(id)}
+        onOpenBrowserImport={() => { setImportFeedback(''); setBrowserImportOpen(true); }}
             />}
             <div ref={pageHostRef} className={`web-page-host ${showWebPage ? 'visible' : 'hidden'}`} aria-hidden="true" />
+            {privacyOpen && state?.sitePrivacy.origin && <SitePrivacyPanel
+              state={state.sitePrivacy}
+              onClose={() => setPrivacyOpen(false)}
+              onPermissionChange={setSitePermission}
+              onAdBlockChange={setSiteAdBlockExcluded}
+            />}
             {findOpen && showWebPage && <div className="find-bar">
               <Search size={15} /><input autoFocus value={findQuery} onChange={(e) => runFind(e.target.value)} onKeyDown={(e) => { if (e.key === 'Escape') closeFind(); }} placeholder="Trova nella pagina..." />
               <button className="icon-button" aria-label="Chiudi ricerca" onClick={closeFind}><X size={15} /></button>
             </div>}
             {permissionRequest && showWebPage && <div className="permission-popover" role="dialog" aria-label="Autorizzazione del sito">
               <div className="permission-popover-head">
-                <span className="permission-icon"><MapPin size={16} /></span>
+                <span className="permission-icon"><Shield size={16} /></span>
                 <div>
                   <strong>{permissionRequest.hostname}</strong>
-                  <span>vuole usare la tua posizione</span>
+                  <span>richiede il permesso: {{
+                    media: 'fotocamera e microfono',
+                    geolocation: 'posizione',
+                    notifications: 'notifiche',
+                    'clipboard-read': 'lettura degli appunti',
+                    midiSysex: 'dispositivi MIDI'
+                  }[permissionRequest.permission] ?? permissionRequest.permission}</span>
                 </div>
               </div>
               <div className="permission-actions">
@@ -173,6 +215,24 @@ export default function App() {
           </div>
         </section>
       </div>
+      {onboardingVisible && state && <Onboarding
+        initialTheme={state.settings.theme}
+        importFeedback={importFeedback}
+        onOpenImport={() => { setImportFeedback(''); setBrowserImportOpen(true); }}
+        onImportFile={async () => {
+          try {
+            const result = await window.umbrella.importBookmarks();
+            setImportFeedback(result.message);
+          } catch {
+            setImportFeedback('Importazione del file non riuscita.');
+          }
+        }}
+        onComplete={completeOnboarding}
+      />}
+      {browserImportOpen && <BrowserImportDialog
+        onClose={() => setBrowserImportOpen(false)}
+        onImported={(result) => setImportFeedback(result.message)}
+      />}
     </div>
   );
 }

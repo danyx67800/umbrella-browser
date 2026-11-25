@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import {
   Bookmark, CirclePlus, Clock3, CloudDownload, PanelLeftClose, PanelLeftOpen,
-  Search, Settings2, Volume2, X
+  Pause, Search, Settings2, Volume2, X
 } from 'lucide-react';
 import type { TabInfo } from '../../electron/preload';
 
@@ -24,6 +24,7 @@ type Props = {
 function TabFavicon({ tab }: { tab: TabInfo }) {
   const [failed, setFailed] = useState(false);
   useEffect(() => setFailed(false), [tab.faviconUrl]);
+  if (tab.suspended) return <Pause size={14} strokeWidth={2} />;
   if (tab.loading) return <span className="mini-spinner" />;
   if (tab.faviconUrl && !failed) {
     return <img className="tab-favicon-image" src={tab.faviconUrl} alt="" onError={() => setFailed(true)} />;
@@ -70,9 +71,9 @@ export default function Sidebar(props: Props) {
             onDrop={() => { if (dragged && dragged !== tab.id) onMoveTab(dragged, index); setDragged(null); }}
             onDragEnd={() => setDragged(null)}
           >
-            <button className="tab-select" onClick={() => onSwitchTab(tab.id)} title={`${tab.title || 'Nuova scheda'}${tab.url ? ` — ${tab.url}` : ''}`} aria-label={`Apri scheda ${tab.title || 'Nuova scheda'}`}>
+            <button className={`tab-select ${tab.suspended ? 'tab-select-suspended' : ''}`} onClick={() => onSwitchTab(tab.id)} title={`${tab.title || 'Nuova scheda'}${tab.url ? ` — ${tab.url}` : ''}${tab.suspended ? ' · Scheda sospesa, verrà ricaricata' : ''}`} aria-label={`Apri scheda ${tab.title || 'Nuova scheda'}${tab.suspended ? ', sospesa' : ''}`}>
               <span className={`tab-favicon ${tab.loading ? 'loading' : ''}`}><TabFavicon tab={tab} /></span>
-              {expanded && <span className="tab-title">{tab.title || 'Nuova scheda'}{tab.incognito && <small> · Privata</small>}</span>}
+              {expanded && <span className="tab-title">{tab.title || 'Nuova scheda'}{tab.suspended && <small> · Sospesa</small>}{tab.incognito && <small> · Privata</small>}</span>}
               {expanded && tab.audible && <Volume2 className="tab-audio" size={13} />}
             </button>
             {expanded && <button className="tab-close" aria-label={`Chiudi ${tab.title || 'scheda'}`} title="Chiudi scheda" onClick={(event) => { event.stopPropagation(); onCloseTab(tab.id); }}><X size={13} /></button>}
@@ -96,7 +97,7 @@ export default function Sidebar(props: Props) {
         ))}
         <div className="sidebar-footer">
           <div className="privacy-indicator"><span className="status-dot" />{expanded && <span>Dati sul dispositivo</span>}</div>
-          {expanded && <span className="sidebar-version">UMBRELLA · 0.3.1</span>}
+          {expanded && <span className="sidebar-version">UMBRELLA · 0.4.4</span>}
         </div>
       </div>
     </aside>

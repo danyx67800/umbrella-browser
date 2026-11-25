@@ -1,22 +1,20 @@
 # UMBRELLA
 
-**Umbrella** è una base di browser desktop per Windows, costruita con Electron, Chromium, React e TypeScript. Il marchio usa il logo a ombrello fornito dall'utente.
-
-> **Versione 0.3.1 — build Windows x64 completata.** Type-check, build Electron e generazione dei pacchetti sono riusciti. I test manuali su Windows restano da completare; Umbrella non è presentato come sostituto pronto per Chrome, Edge o Firefox.
+**Umbrella 0.4.4** è un browser desktop Windows basato su Electron, Chromium, React e TypeScript. Include modalità performance, controlli privacy per sito e sospensione delle schede inattive, oltre alla Discord Activity e alle funzionalità di primo avvio e trasferimento dati browser.
 
 ## Stack
 
-- Electron 45.4.1 / Chromium 156
-- React 19 + TypeScript 7
-- Vite 8 + electron-vite 6
-- `WebContentsView` per caricare le pagine web come vere viste Chromium, senza iframe
-- DuckDuckGo come motore di ricerca predefinito
-- `@ghostery/adblocker-electron` per filtrare pubblicità e tracker
+- Electron 45.4.1 / Chromium 156 / Node.js integrato 24.22.3.
+- React 19 + TypeScript 7.
+- Vite 8 + electron-vite 6.
+- `WebContentsView` per le pagine web reali, senza iframe.
+- DuckDuckGo come motore di ricerca predefinito.
+- `@ghostery/adblocker-electron` per il filtro di annunci e tracker.
 
 ## Requisiti e avvio
 
-- Windows 10/11 x64 per la distribuzione richiesta.
-- Node.js 24 LTS (o almeno 22.12) e npm 10+.
+- Windows 10/11 x64 per il prodotto desktop.
+- Node.js 24 LTS consigliato per lo sviluppo, npm 10+.
 
 ```bash
 npm install
@@ -27,60 +25,116 @@ Controlli e build:
 
 ```bash
 npm run typecheck
+npm test
 npm run build
 npm run dist
 ```
 
-`npm run dist` è configurato per generare un installer NSIS e una versione portable x64 in `release/`. La build deve essere eseguita e collaudata su Windows.
+`npm run dist` è configurato per generare installer NSIS e pacchetto portable x64 in `release/`. La build distribuita va provata su Windows 10/11.
 
-## Interfaccia 0.3.1
+## Primo avvio
 
-- Toolbar compatta a tutta larghezza e sidebar verticale comprimibile.
-- Il logo fornito è usato nella Nuova scheda, nelle informazioni del browser e nell'icona dell'app. Le schede vuote usano il pittogramma trasparente fornito separatamente su fondo blu.
-- Le pagine non attive usano il throttling in background di Chromium; al ripristino viene caricata soltanto la scheda attiva e le altre si aprono al primo accesso. L'orologio aggiorna solo il proprio componente per limitare i render inutili.
-- Schede verticali con favicon del sito; per una nuova scheda viene mostrato il logo Umbrella.
-- In modalità sidebar compatta, il titolo della scheda e l'indirizzo vengono mostrati dal tooltip nativo del controllo al passaggio del cursore. Nella sidebar espansa il titolo resta visibile.
-- Il menu contestuale delle schede è un menu nativo Electron, non un popover HTML sopra la pagina. Questo evita che venga coperto dalla superficie nativa di `WebContentsView`.
-- Chiusura scheda: la vista viene nascosta e rimossa dalla finestra prima di chiudere il relativo `WebContents`, poi viene ricalcolata la vista attiva.
-- Nuova scheda senza wallpaper anime obbligatorio: resta neutra fino a quando l'utente sceglie un'immagine.
-- Orologio, data, ricerca DuckDuckGo, accessi rapidi e accesso alle impostazioni.
-- Layout con limiti di larghezza e altezza per ridurre i problemi di clipping e overflow nelle finestre piccole.
+La configurazione iniziale contiene tre passaggi:
 
-## Sfondo personalizzato
+1. **Importa dati**: apre la finestra di rilevamento dei browser presenti sul PC. L'utente sceglie il browser, il profilo e i dati da trasferire.
+2. **Browser predefinito**: registra Umbrella nelle app browser disponibili e apre direttamente la pagina delle app predefinite di Windows. L'utente deve selezionare Umbrella e confermare HTTP e HTTPS.
+3. **Tema**: scelta tra chiaro, scuro e sistema.
 
-Dalle **Impostazioni → Wallpaper → Cambia sfondo** si può scegliere un'immagine JPG, JPEG, PNG, WEBP o GIF fino a 30 MB. Umbrella ne copia una versione nella propria cartella dati e salva il percorso, così lo sfondo resta disponibile dopo il riavvio. **Rimuovi** ripristina lo sfondo neutro. Non viene più impostato automaticamente lo sfondo anime delle schermate di riferimento.
+Tutti i passaggi sono facoltativi: l'utente può continuare senza importare dati o senza impostare subito Umbrella come predefinito. La procedura di importazione resta disponibile anche in **Impostazioni → Trasferimento dati**.
 
-## Schede e favicon
+La configurazione iniziale viene ricordata tra gli avvii e le reinstallazioni, senza cancellare i dati dell'utente. Quando viene introdotta una nuova revisione della procedura, questa viene mostrata una volta anche a chi aveva già installato Umbrella; in seguito non ricompare. Se è già stata completata, la procedura per il browser predefinito resta disponibile in **Impostazioni → Browser predefinito**.
 
-Le favicon vengono ricevute dagli eventi `page-favicon-updated` di Chromium e associate alla scheda corretta. Il nome della pagina è mostrato nella sidebar espansa e nel tooltip nativo al passaggio del cursore sulla scheda compressa. Il menu contestuale nativo include nuova scheda, duplica, chiudi, chiudi le altre e ripristina scheda chiusa. Il clic centrale sulla scheda la chiude.
+## Importazione da altri browser
 
-## Estensioni
+Il rilevatore cerca profili locali e li raggruppa per browser. Le cartelle profilo vengono cercate nei percorsi standard di Windows.
 
-Dalla sezione **Estensioni** si può scegliere una cartella di estensione già estratta, con `manifest.json`, installarla, abilitarla/disabilitarla o rimuoverla. Questa versione accetta Manifest V3.
+Browser Chromium rilevati quando i relativi profili sono presenti:
 
-**Limiti tecnici Electron:** non supporta file `.crx`, non implementa tutte le API di Chrome, e non garantisce compatibilità con tutte le estensioni del Chrome Web Store. Le estensioni possono essere caricate solo in sessioni persistenti; non vengono caricate nelle schede private. Umbrella registra il percorso della cartella e ricarica l'estensione a ogni avvio: se la cartella viene spostata o cancellata, l'estensione non potrà essere ripristinata. Installa soltanto estensioni attendibili: il codice dell'estensione può agire sui siti secondo i permessi richiesti.
+- Google Chrome (Stable, Beta, Dev e Canary).
+- Microsoft Edge (Stable, Beta, Dev e Canary).
+- Brave (Stable, Beta e Nightly).
+- Opera, Opera GX e Opera Beta.
+- Vivaldi e Vivaldi Snapshot.
+- Chromium, Yandex Browser, Arc, Sidekick, Epic Privacy Browser.
+- Comodo Dragon, Slimjet, SRWare Iron, Cent Browser, Cốc Cốc e Naver Whale.
 
-## Ad blocker integrato
+Browser basati su Firefox/Gecko rilevati quando il profilo contiene `places.sqlite`:
 
-L'ad blocker è attivo per impostazione predefinita e usa `ElectronBlocker` con filtri predefiniti pubblicità + tracking. Al primo avvio scarica il motore di filtri e lo conserva nella cartella dati di Umbrella; le sessioni persistenti e quelle private già aperte ricevono il filtro quando disponibile. L'avvio dell'interfaccia non resta bloccato durante il primo download dei filtri.
+- Mozilla Firefox e i profili Firefox registrati in `profiles.ini` (inclusi i profili separati di Beta/Developer Edition/Nightly quando registrati lì).
+- Waterfox, LibreWolf, Floorp, Zen Browser, Pale Moon, SeaMonkey e Mullvad Browser.
 
-La schermata Impostazioni mostra se i filtri sono attivi, in caricamento o non disponibili. Se il primo download fallisce (ad esempio per assenza di rete), la protezione non è attiva finché il motore non viene caricato. In questa versione non ci sono ancora aggiornamenti pianificati dei filtri né eccezioni configurabili per singolo sito.
+È disponibile anche l'importazione dei Preferiti di Windows/Internet Explorer quando la cartella Favorites contiene file `.url`.
 
-## Altre funzioni implementate
+### Dati trasferibili
 
-- Pagine web reali con viste separate e navigazione HTTP/HTTPS.
-- Indietro, avanti, ricarica, stop e trova nella pagina (`Ctrl+F`).
-- DuckDuckGo per le ricerche dalla barra e dalla Nuova scheda.
-- Schede normali persistenti e sessioni private temporanee.
-- Preferiti con esportazione/importazione JSON.
-- Cronologia con rimozione singole voci e cancellazione completa.
-- Download con progresso, pausa/ripresa quando supportate, annullamento, apertura e mostra nella cartella.
-- Richieste di permesso per un insieme limitato di autorizzazioni; gli altri permessi sono negati.
-- Tema scuro/chiaro/sistema e ripristino schede.
+Per ogni profilo vengono mostrate le categorie disponibili:
 
-## Persistenza e cartella dati
+- **Preferiti**: segnalibri e cartelle con URL HTTP/HTTPS.
+- **Cronologia**: URL visitati, titolo e data dell'ultima visita disponibile. Umbrella legge i database Chromium `History` e Gecko `places.sqlite` tramite una copia temporanea del database, senza modificare il profilo sorgente.
 
-I dati del browser sono salvati nella directory `userData/Umbrella` di Electron, distinta dai file dell'applicazione. La struttura conserva preferiti, cronologia, impostazioni, wallpaper, percorsi delle estensioni e sessione. Il database viene aggiornato senza sovrascrivere preferiti e cronologia esistenti.
+Gli URL già presenti vengono ignorati per evitare duplicati. L'importazione della cronologia aggiunge fino a 3.000 URL recenti per profilo e il database locale conserva fino a 5.000 voci.
+
+**Non vengono importati password, carte di pagamento, cookie, sessioni di accesso, estensioni o schede aperte.** Questi dati sono legati alla cifratura del sistema operativo, al profilo o alle credenziali del browser e richiedono procedure di migrazione separate. Per risultati più affidabili, chiudi il vecchio browser prima dell'importazione: se un database è in uso o non può essere letto, Umbrella mostra un avviso e non modifica il file originale.
+
+Se il browser non viene rilevato (ad esempio perché usa una cartella profilo personalizzata), scegli **Cerca cartella** nella finestra di importazione: puoi indicare la cartella `User Data`, `Profiles` o quella del singolo profilo. Questo percorso manuale riconosce i formati Chromium e Gecko. Per browser con formati diversi, puoi importare i preferiti da un file HTML o JSON esportato. La scansione non carica né invia dati a Internet. Non è possibile garantire la rilevazione automatica di ogni fork, versione portable o profilo salvato in un percorso non standard.
+
+## Browser predefinito su Windows
+
+Quando la procedura viene avviata, Umbrella registra sotto l'account Windows corrente:
+
+- i ProgID `UmbrellaURL` e `UmbrellaHTML`;
+- le associazioni per `http`, `https`, `.htm` e `.html`;
+- la voce `Umbrella` in `HKCU\Software\RegisteredApplications`;
+- i comandi di apertura che puntano all'eseguibile Umbrella.
+
+Poi apre `ms-settings:defaultapps?registeredAppUser=Umbrella`, la pagina di Windows dedicata all'app registrata. Il comando viene eseguito dopo aver scritto la voce `Umbrella` in `HKCU\Software\RegisteredApplications`; su Windows la query `registeredAppUser` individua il nome del valore registrato in quell'hive. La verifica legge le associazioni `UserChoice` per HTTP e HTTPS e conferma Umbrella solo quando entrambi puntano al ProgID `UmbrellaURL`.
+
+**Windows mantiene la decisione finale nelle proprie impostazioni di sistema.** Umbrella non può né deve forzare silenziosamente il browser predefinito: nella pagina che si apre seleziona Umbrella e assegna i protocolli HTTP e HTTPS. Dopo la scelta, torna alla procedura e premi **Verifica browser predefinito**.
+
+Se hai già completato la configurazione iniziale, apri **Impostazioni → Browser predefinito** per riaprire la pagina di Windows e verificare la selezione.
+
+La gestione del protocollo include anche l'apertura di link HTTP/HTTPS quando Umbrella è già in esecuzione (seconda istanza) oppure quando viene avviato da Windows con un link.
+
+## Discord Activity
+
+Per mostrare sul profilo Discord che stai usando Umbrella, apri **Impostazioni → Discord Activity**. Nel [Discord Developer Portal](https://discord.com/developers/applications) crea un'applicazione, copia il suo **Application ID**, incollalo in Umbrella e attiva **Attività Discord**. Per l'icona, carica [`resources/umbrella-icon.png`](./resources/umbrella-icon.png) nella sezione **Rich Presence → Art Assets** della stessa applicazione e usa il nome/chiave `umbrella`. Nell'installer il file è incluso in `resources/umbrella-icon.png` accanto a `Umbrella.exe`. Discord Desktop deve essere in esecuzione; se si avvia dopo Umbrella, la connessione viene ritentata automaticamente.
+
+La presenza mostra solo che stai navigando con Umbrella. Non include URL, titoli delle pagine, cronologia o altri dati di navigazione. Puoi disattivarla in qualsiasi momento dalle impostazioni. Per una distribuzione pubblica, configura l'ID dell'applicazione Discord ufficiale del progetto.
+
+## Privacy per sito e sospensione schede
+
+L'icona a sinistra della barra degli indirizzi apre i controlli privacy per l'origine HTTP/HTTPS corrente. Da qui puoi vedere i domini delle richieste bloccate (conteggio temporaneo, locale), escludere il sito dall'ad blocker e impostare i permessi di fotocamera/microfono, posizione, notifiche, lettura appunti e MIDI su **Chiedi**, **Consenti** o **Blocca**. Le modifiche ai filtri possono richiedere il ricaricamento della pagina. In modalità privata questi controlli per sito non sono disponibili e le richieste di permesso vengono negate.
+
+In **Impostazioni → Esperienza** scegli dopo quanto tempo sospendere le schede inattive (mai, 5, 15, 30 o 60 minuti). L'impostazione predefinita è 30 minuti. Le schede attive, private, in caricamento o con audio non vengono sospese. La sospensione scarica la pagina dalla memoria e la ricarica quando la riapri: eventuali dati non salvati nei moduli possono andare persi.
+
+## Altre funzionalità presenti
+
+- Toolbar compatta e sidebar verticale comprimibile.
+- Schede Chromium reali tramite `WebContentsView`, favicon e menu schede nativo.
+- Nuova scheda con orologio, ricerca DuckDuckGo, scorciatoie e wallpaper personalizzabile.
+- Preferiti e cronologia locali.
+- Download manager.
+- Sessioni private separate.
+- Estensioni da cartelle già estratte Manifest V3, con i limiti delle API Electron.
+- Ad blocker Ghostery con filtri pubblicitari e anti-tracking.
+- Discord Rich Presence/Activity facoltativa, con logo Umbrella e Application ID configurabile.
+- Modalità performance attivabile dalla toolbar: mantiene schede, barra indirizzi ed estensioni, rimuove gli elementi decorativi della nuova scheda e disattiva animazioni/transizioni dell'interfaccia.
+- Privacy per sito: permessi salvabili, eccezioni dell'ad blocker e conteggio locale dei domini bloccati.
+- Sospensione automatica configurabile delle schede inattive per liberare memoria.
+- Tema chiaro/scuro/sistema.
+- Backup locale dei dati e persistenza separata dai file dell'applicazione.
+
+## Note sulla sicurezza
+
+L'importazione browser viene eseguita nel processo principale Electron. Gli identificatori dei profili esposti all'interfaccia sono hash, non percorsi assoluti. Durante la lettura SQLite, Umbrella copia il database e gli eventuali file WAL/SHM in una cartella temporanea e interroga la copia. Il profilo sorgente non viene modificato.
+
+Le password non vengono lette né esportate. Le pagine web non ricevono privilegi Node.js. Il renderer usa `contextIsolation`, `nodeIntegration: false`, sandbox e IPC mediato dal preload.
+
+Per le estensioni, installa solo cartelle attendibili: le estensioni possono leggere o modificare i siti secondo i permessi dichiarati dal loro manifest.
+
+## Persistenza
+
+I dati browser sono conservati nella directory `userData/Umbrella`, distinta dai file dell'applicazione. Include preferiti, cronologia, impostazioni, wallpaper, percorsi estensioni e sessione. L'aggiornamento dell'app non deve sovrascrivere il profilo dell'utente.
 
 ## Tasti rapidi
 
@@ -94,6 +148,6 @@ I dati del browser sono salvati nella directory `userData/Umbrella` di Electron,
 - Clic centrale sulla scheda: chiudi scheda
 - Tasto destro sulla scheda: menu contestuale
 
-## Verifiche e test ancora necessari
+## Verifiche
 
-Il type-check, la build Electron e la generazione dei pacchetti Windows x64 sono riusciti. Restano da eseguire i test manuali di navigazione/chiusura schede/favicons/wallpaper/estensioni/ad blocker su Windows 10/11. Sono inoltre da completare controlli granulari dei permessi per sito, aggiornamento filtri, eccezioni ad blocker, test d'integrazione, controllo accessibilità, performance e audit sicurezza.
+I test automatizzati includono la lettura di un profilo Chromium simulato e un profilo Firefox/Gecko simulato con SQLite temporaneo, oltre ai test esistenti per preferiti HTML e navigazione DuckDuckGo. Le prove su un'installazione reale Windows 10/11 restano necessarie per verificare i percorsi presenti sul PC, le autorizzazioni dei database browser e la selezione effettiva di HTTP/HTTPS nelle Impostazioni di Windows.

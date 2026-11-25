@@ -11,6 +11,8 @@ export type InstalledExtension = {
   path: string;
   enabled: boolean;
 };
+export type SitePermissionName = 'media' | 'geolocation' | 'notifications' | 'clipboard-read' | 'midiSysex';
+export type SitePermissionOverrides = Record<string, Partial<Record<SitePermissionName, boolean>>>;
 export type AppSettings = {
   theme: 'dark' | 'light' | 'system';
   accent: string;
@@ -19,10 +21,18 @@ export type AppSettings = {
   downloadNotifications: boolean;
   wallpaperPath: string | null;
   adBlockEnabled: boolean;
+  onboardingCompleted: boolean;
+  discordActivityEnabled: boolean;
+  discordClientId: string;
+  performanceModeEnabled: boolean;
+  sitePermissions: SitePermissionOverrides;
+  adBlockExcludedSites: string[];
+  tabSuspendAfterMinutes: number;
 };
 export type PersistedTab = { url: string; title: string };
 export type Database = {
-  version: 2;
+  version: 4;
+  onboardingRevision: number;
   bookmarks: Bookmark[];
   history: Visit[];
   settings: AppSettings;
@@ -30,8 +40,11 @@ export type Database = {
   extensions: InstalledExtension[];
 };
 
+const ONBOARDING_REVISION = 1;
+
 const defaultDb = (): Database => ({
-  version: 2,
+  version: 4,
+  onboardingRevision: ONBOARDING_REVISION,
   bookmarks: [],
   history: [],
   settings: {
@@ -41,7 +54,14 @@ const defaultDb = (): Database => ({
     askDownloadLocation: false,
     downloadNotifications: true,
     wallpaperPath: null,
-    adBlockEnabled: true
+    adBlockEnabled: true,
+    onboardingCompleted: false,
+    discordActivityEnabled: false,
+    discordClientId: '',
+    performanceModeEnabled: false,
+    sitePermissions: {},
+    adBlockExcludedSites: [],
+    tabSuspendAfterMinutes: 30
   },
   lastSession: [],
   extensions: []
@@ -56,14 +76,34 @@ export function loadDatabase() {
     const path = databasePath();
     if (existsSync(path)) {
       const parsed = JSON.parse(readFileSync(path, 'utf8')) as Partial<Database>;
+      const savedSettings = parsed.settings;
+      const settings = { ...defaultDb().settings, ...parsed.settings };
+      settings.discordActivityEnabled = typeof savedSettings?.discordActivityEnabled === 'boolean'
+        ? savedSettings.discordActivityEnabled
+        : false;
+      settings.discordClientId = typeof savedSettings?.discordClientId === 'string'
+        ? savedSettings.discordClientId
+        : '';
+      settings.performanceModeEnabled = typeof savedSettings?.performanceModeEnabled === 'boolean'
+        ? savedSettings.performanceModeEnabled
+        : false;
+      settings.sitePermissions = sanitizeSitePermissions(savedSettings?.sitePermissions);
+      settings.adBlockExcludedSites = sanitizeSiteOrigins(savedSettings?.adBlockExcludedSites);
+      settings.tabSuspendAfterMinutes = [0, 5, 15, 30, 60].includes(savedSettings?.tabSuspendAfterMinutes ?? 30)
+        ? savedSettings?.tabSuspendAfterMinutes ?? 30
+        : 30;
+      if ((parsed.onboardingRevision ?? 0) < ONBOARDING_REVISION) {
+        settings.onboardingCompleted = false;
+      }
       database = {
         ...defaultDb(),
         ...parsed,
-        version: 2,
+        version: 4,
+        onboardingRevision: ONBOARDING_REVISION,
         extensions: Array.isArray(parsed.extensions) ? parsed.extensions : [],
-        settings: { ...defaultDb().settings, ...parsed.settings }
+        settings
       };
-      // Version 1 databases are upgraded in place without replacing user data.
+      // Older database versions and onboarding flows are upgraded in place.
       saveDatabase();
     } else {
       database = defaultDb();
@@ -91,3 +131,33 @@ export function saveDatabase() {
 }
 
 export function getDataDirectory() { return dataDirectory(); }
+
+function sanitizeSitePermissions(value: unknown): SitePermissionOverrides {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const permissions: SitePermissionOverrides = {};
+  const supported: SitePermissionName[] = ['media', 'geolocation', 'notifications', 'clipboard-read', 'midiSysex'];
+  for (const [origin, valueForOrigin] of Object.entries(value)) {
+    if (!isHttpOrigin(origin) || !valueForOrigin || typeof valueForOrigin !== 'object' || Array.isArray(valueForOrigin)) continue;
+    const saved: Partial<Record<SitePermissionName, boolean>> = {};
+    for (const permission of supported) {
+      const decision = (valueForOrigin as Record<string, unknown>)[permission];
+      if (typeof decision === 'boolean') saved[permission] = decision;
+    }
+    if (Object.keys(saved).length) permissions[origin] = saved;
+  }
+  return permissions;
+}
+
+function sanitizeSiteOrigins(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.filter((origin): origin is string => typeof origin === 'string' && isHttpOrigin(origin)))];
+}
+
+function isHttpOrigin(value: string) {
+  try {
+    const parsed = new URL(value);
+    return (parsed.protocol === 'http:' || parsed.protocol === 'https:') && parsed.origin === value;
+  } catch {
+    return false;
+  }
+}

@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { AppSettings, Bookmark, Visit } from './storage';
+import type { AppSettings, Bookmark, SitePermissionName, Visit } from './storage';
 
 export type TabInfo = {
   id: string;
@@ -12,6 +12,15 @@ export type TabInfo = {
   audible: boolean;
   incognito: boolean;
   faviconUrl: string | null;
+  suspended: boolean;
+};
+export type BlockedTracker = { hostname: string; count: number };
+export type SitePrivacyState = {
+  origin: string | null;
+  permissions: Partial<Record<SitePermissionName, boolean>>;
+  adBlockEnabled: boolean;
+  adBlockExcluded: boolean;
+  blockedTrackers: BlockedTracker[];
 };
 export type DownloadInfo = {
   id: string;
@@ -35,12 +44,36 @@ export type BrowserState = {
   extensions: ExtensionInfo[];
   adBlockReady: boolean;
   adBlockError: string | null;
+  sitePrivacy: SitePrivacyState;
 };
 export type PermissionRequest = {
   id: string;
   permission: string;
   origin: string;
   hostname: string;
+};
+export type BookmarkImportResult = { ok: boolean; count: number; message: string };
+export type DefaultBrowserResult = { registered: boolean; isDefault: boolean; settingsOpened: boolean; message?: string };
+export type ImportBrowserProfile = {
+  id: string;
+  label: string;
+  bookmarksAvailable: boolean;
+  historyAvailable: boolean;
+};
+export type ImportBrowserInfo = {
+  id: string;
+  name: string;
+  engine: 'Chromium' | 'Firefox' | 'Legacy';
+  profiles: ImportBrowserProfile[];
+};
+export type BrowserImportResult = {
+  ok: boolean;
+  bookmarksImported: number;
+  historyImported: number;
+  browserName?: string;
+  profileName?: string;
+  message: string;
+  warnings: string[];
 };
 
 const api = {
@@ -67,6 +100,10 @@ const api = {
   },
   respondToPermission: (id: string, allowed: boolean) =>
     ipcRenderer.invoke('permissions:respond', { id, allowed }) as Promise<boolean>,
+  setSitePermission: (origin: string, permission: SitePermissionName, allowed: boolean | null) =>
+    ipcRenderer.invoke('privacy:set-site-permission', { origin, permission, allowed }) as Promise<boolean>,
+  setSiteAdBlockExcluded: (origin: string, excluded: boolean) =>
+    ipcRenderer.invoke('privacy:set-site-adblock-excluded', { origin, excluded }) as Promise<boolean>,
   setContentBounds: (bounds: { x: number; y: number; width: number; height: number; visible: boolean }) =>
     ipcRenderer.send('browser:set-content-bounds', bounds),
   navigate: (input: string, tabId?: string) => ipcRenderer.invoke('browser:navigate', { input, tabId }),
@@ -89,6 +126,13 @@ const api = {
   clearHistory: () => ipcRenderer.invoke('history:clear'),
   downloadAction: (id: string, action: 'pause' | 'resume' | 'cancel' | 'open' | 'show') => ipcRenderer.invoke('downloads:action', { id, action }),
   updateSettings: (settings: Partial<AppSettings>) => ipcRenderer.invoke('settings:update', settings),
+  setDefaultBrowser: () => ipcRenderer.invoke('browser:set-default') as Promise<DefaultBrowserResult>,
+  checkDefaultBrowser: () => ipcRenderer.invoke('browser:check-default') as Promise<DefaultBrowserResult>,
+  openDiscordDeveloperPortal: () => ipcRenderer.invoke('discord:open-developer-portal') as Promise<boolean>,
+  scanImportSources: () => ipcRenderer.invoke('browser:scan-import-sources') as Promise<ImportBrowserInfo[]>,
+  chooseCustomImportSource: () => ipcRenderer.invoke('browser:choose-custom-import-source') as Promise<ImportBrowserInfo | null>,
+  importBrowserProfile: (browserId: string, profileId: string, options: { bookmarks: boolean; history: boolean }) =>
+    ipcRenderer.invoke('browser:import-profile', { browserId, profileId, options }) as Promise<BrowserImportResult>,
   chooseWallpaper: () => ipcRenderer.invoke('wallpaper:choose') as Promise<boolean>,
   resetWallpaper: () => ipcRenderer.invoke('wallpaper:reset') as Promise<boolean>,
   addExtension: () => ipcRenderer.invoke('extensions:add') as Promise<{ ok: boolean; message: string }>,
@@ -98,7 +142,7 @@ const api = {
     ipcRenderer.invoke('extensions:open-popup', { id, position }) as Promise<{ ok: boolean; message?: string }>,
   clearBrowsingData: () => ipcRenderer.invoke('settings:clear-data'),
   exportBookmarks: () => ipcRenderer.invoke('bookmarks:export'),
-  importBookmarks: () => ipcRenderer.invoke('bookmarks:import'),
+  importBookmarks: () => ipcRenderer.invoke('bookmarks:import') as Promise<BookmarkImportResult>,
   findInPage: (query: string) => ipcRenderer.invoke('browser:find', query),
   stopFind: () => ipcRenderer.invoke('browser:stop-find'),
   windowAction: (action: 'minimize' | 'maximize' | 'close') => ipcRenderer.invoke('window:action', action)

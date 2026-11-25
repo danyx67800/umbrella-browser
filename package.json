@@ -1,6 +1,6 @@
 {
   "name": "umbrella-browser",
-  "version": "0.3.1",
+  "version": "0.4.4",
   "private": true,
   "description": "Umbrella — a minimal, privacy-conscious Chromium desktop browser with custom wallpapers, Chrome-compatible extensions and integrated ad blocking.",
   "main": "./out/main/index.js",
@@ -14,15 +14,17 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
+    "test": "node --experimental-strip-types --test electron/bookmarks.test.ts electron/navigation.test.ts electron/browser-import.test.ts electron/discord-presence.test.ts electron/tab-suspension.test.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "dist": "npm run build && electron-builder --win nsis portable --x64"
   },
   "dependencies": {
+    "@ghostery/adblocker-electron": "^2.20.3",
+    "@xhayper/discord-rpc": "^1.5.1",
+    "cross-fetch": "^4.1.0",
     "lucide-react": "^1.78.0",
     "react": "^19.3.1",
-    "react-dom": "^19.3.1",
-    "@ghostery/adblocker-electron": "^2.20.3",
-    "cross-fetch": "^4.1.0"
+    "react-dom": "^19.3.1"
   },
   "devDependencies": {
     "@types/node": "^24.10.0",
@@ -49,6 +51,10 @@
       {
         "from": "resources/umbrella.ico",
         "to": "umbrella.ico"
+      },
+      {
+        "from": "resources/umbrella-icon.png",
+        "to": "umbrella-icon.png"
       }
     ],
     "asar": true,

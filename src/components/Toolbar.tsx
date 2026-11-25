@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   ArrowDownToLine, ArrowLeft, ArrowRight, Bookmark,
-  LockKeyhole, MoreHorizontal, Puzzle, RotateCw, Search,
+  Gauge, LockKeyhole, MoreHorizontal, Puzzle, RotateCw, Shield,
   Square, X, Minus, PanelLeft
 } from 'lucide-react';
 import type { ExtensionInfo, TabInfo } from '../../electron/preload';
@@ -22,12 +22,17 @@ type Props = {
   onSettings: () => void;
   onExtensions: () => void;
   onToggleSidebar: () => void;
+  performanceMode: boolean;
+  onTogglePerformanceMode: () => void;
+  sitePrivacyAvailable: boolean;
+  privacyOpen: boolean;
+  onTogglePrivacy: () => void;
 };
 
 export default function Toolbar(props: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [extensionMessage, setExtensionMessage] = useState('');
-  const { activeTab, extensions, address, setAddress, onNavigate, onBack, onForward, onReload, onStop, onBookmark, isBookmarked, onDownloads, onSettings, onExtensions, onToggleSidebar } = props;
+  const { activeTab, extensions, address, setAddress, onNavigate, onBack, onForward, onReload, onStop, onBookmark, isBookmarked, onDownloads, onSettings, onExtensions, onToggleSidebar, performanceMode, onTogglePerformanceMode, sitePrivacyAvailable, privacyOpen, onTogglePrivacy } = props;
 
   useEffect(() => {
     const focus = () => { inputRef.current?.focus(); inputRef.current?.select(); };
@@ -54,9 +59,9 @@ export default function Toolbar(props: Props) {
       </div>
 
       <form className="address-form" onSubmit={(event) => { event.preventDefault(); onNavigate(); }}>
-        <span className={`address-security ${secure ? 'secure' : ''}`} title={secure ? 'Connessione HTTPS' : 'Informazioni sito'}>
-          {secure ? <LockKeyhole size={14} /> : <Search size={15} />}
-        </span>
+        <button className={`address-security ${secure ? 'secure' : ''} ${privacyOpen ? 'selected' : ''}`} type="button" aria-label="Privacy e permessi del sito" title="Privacy e permessi del sito" aria-expanded={privacyOpen} disabled={!sitePrivacyAvailable} onClick={onTogglePrivacy}>
+          {secure ? <LockKeyhole size={14} /> : <Shield size={15} />}
+        </button>
         <input
           ref={inputRef}
           className="address-input"
@@ -73,8 +78,8 @@ export default function Toolbar(props: Props) {
       </form>
 
       <div className="toolbar-actions">
-        <button className="icon-button" aria-label="Download" onClick={onDownloads}><ArrowDownToLine size={17} /></button>
-        <button className="icon-button" aria-label="Estensioni" title="Estensioni" onClick={onExtensions}><Puzzle size={17} /></button>
+        <button className="icon-button toolbar-download-button" aria-label="Download" onClick={onDownloads}><ArrowDownToLine size={17} /></button>
+        <button className="icon-button toolbar-extensions-button" aria-label="Estensioni" title="Estensioni" onClick={onExtensions}><Puzzle size={17} /></button>
         <div className="toolbar-extensions" aria-label="Estensioni installate">
           {extensions.filter((extension) => extension.enabled).map((extension) => (
             <button key={extension.id} className="toolbar-extension" title={extension.name} aria-label={`Apri estensione ${extension.name}`} onClick={(event) => {
@@ -92,9 +97,18 @@ export default function Toolbar(props: Props) {
             </button>
           ))}
         </div>
-        <button className="icon-button" aria-label="Impostazioni" onClick={onSettings}><MoreHorizontal size={19} /></button>
+        <button className="icon-button toolbar-settings-button" aria-label="Impostazioni" onClick={onSettings}><MoreHorizontal size={19} /></button>
       </div>
       {extensionMessage && <div className="toolbar-extension-message" role="status">{extensionMessage}</div>}
+      <button
+        className={`icon-button performance-mode-toggle ${performanceMode ? 'active' : ''}`}
+        aria-label={performanceMode ? 'Disattiva modalità performance' : 'Attiva modalità performance'}
+        aria-pressed={performanceMode}
+        title={performanceMode ? 'Disattiva modalità performance' : 'Attiva modalità performance'}
+        onClick={onTogglePerformanceMode}
+      >
+        <Gauge size={17} />
+      </button>
       <div className="window-controls">
         <button className="window-control" aria-label="Minimizza" onClick={() => window.umbrella.windowAction('minimize')}><Minus size={14} /></button>
         <button className="window-control" aria-label="Massimizza" onClick={() => window.umbrella.windowAction('maximize')}><Square size={12} /></button>

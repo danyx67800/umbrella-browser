@@ -1,6 +1,16 @@
-export function resolveNavigation(input: string): string {
+export type BrowserTheme = 'dark' | 'light' | 'system';
+
+function duckDuckGoUrl(query: string | null, theme: BrowserTheme) {
+  const url = new URL('https://duckduckgo.com/');
+  if (query) url.searchParams.set('q', query);
+  if (theme === 'dark') url.searchParams.set('kae', 'd');
+  else if (theme === 'light') url.searchParams.set('kae', 'l');
+  return url.toString();
+}
+
+export function resolveNavigation(input: string, theme: BrowserTheme = 'system'): string {
   const value = input.trim();
-  if (!value) return 'https://duckduckgo.com/';
+  if (!value) return duckDuckGoUrl(null, theme);
 
   // A host-like value is treated as a direct URL; everything else is a search.
   const hasWhitespace = /\s/.test(value);
@@ -12,12 +22,19 @@ export function resolveNavigation(input: string): string {
     const candidate = /^https?:\/\//i.test(value) ? value : `https://${value}`;
     try {
       const url = new URL(candidate);
-      if (url.protocol === 'http:' || url.protocol === 'https:') return url.toString();
+      if (url.protocol === 'http:' || url.protocol === 'https:') {
+        if (url.hostname === 'duckduckgo.com') applyDuckDuckGoTheme(url, theme);
+        return url.toString();
+      }
     } catch { /* fall through to a DuckDuckGo search */ }
   }
 
-  const query = new URLSearchParams({ q: value });
-  return `https://duckduckgo.com/?${query.toString()}`;
+  return duckDuckGoUrl(value, theme);
+}
+
+function applyDuckDuckGoTheme(url: URL, theme: BrowserTheme) {
+  if (theme === 'dark') url.searchParams.set('kae', 'd');
+  else if (theme === 'light') url.searchParams.set('kae', 'l');
 }
 
 export function isSafeWebUrl(raw: string) {

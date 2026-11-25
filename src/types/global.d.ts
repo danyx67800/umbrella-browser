@@ -1,5 +1,5 @@
-import type { BrowserState, PermissionRequest } from '../../electron/preload';
-import type { AppSettings } from '../../electron/storage';
+import type { BookmarkImportResult, BrowserImportResult, BrowserState, DefaultBrowserResult, ImportBrowserInfo, PermissionRequest } from '../../electron/preload';
+import type { AppSettings, SitePermissionName } from '../../electron/storage';
 
 declare global {
   interface Window {
@@ -10,6 +10,8 @@ declare global {
       onFindRequest: (callback: () => void) => () => void;
       onPermissionRequest: (callback: (request: PermissionRequest) => void) => () => void;
       respondToPermission: (id: string, allowed: boolean) => Promise<boolean>;
+      setSitePermission: (origin: string, permission: SitePermissionName, allowed: boolean | null) => Promise<boolean>;
+      setSiteAdBlockExcluded: (origin: string, excluded: boolean) => Promise<boolean>;
       setContentBounds: (bounds: { x: number; y: number; width: number; height: number; visible: boolean }) => void;
       navigate: (input: string, tabId?: string) => Promise<boolean>;
       newTab: (url?: string, incognito?: boolean) => Promise<string | null>;
@@ -31,6 +33,12 @@ declare global {
       clearHistory: () => Promise<void>;
       downloadAction: (id: string, action: 'pause' | 'resume' | 'cancel' | 'open' | 'show') => Promise<boolean>;
       updateSettings: (settings: Partial<AppSettings>) => Promise<AppSettings>;
+      setDefaultBrowser: () => Promise<DefaultBrowserResult>;
+      checkDefaultBrowser: () => Promise<DefaultBrowserResult>;
+      openDiscordDeveloperPortal: () => Promise<boolean>;
+      scanImportSources: () => Promise<ImportBrowserInfo[]>;
+      chooseCustomImportSource: () => Promise<ImportBrowserInfo | null>;
+      importBrowserProfile: (browserId: string, profileId: string, options: { bookmarks: boolean; history: boolean }) => Promise<BrowserImportResult>;
       chooseWallpaper: () => Promise<boolean>;
       resetWallpaper: () => Promise<boolean>;
       addExtension: () => Promise<{ ok: boolean; message: string }>;
@@ -39,7 +47,7 @@ declare global {
       openExtensionPopup: (id: string, position: { right: number; bottom: number }) => Promise<{ ok: boolean; message?: string }>;
       clearBrowsingData: () => Promise<boolean>;
       exportBookmarks: () => Promise<boolean>;
-      importBookmarks: () => Promise<boolean>;
+      importBookmarks: () => Promise<BookmarkImportResult>;
       findInPage: (query: string) => Promise<void>;
       stopFind: () => Promise<void>;
       windowAction: (action: 'minimize' | 'maximize' | 'close') => Promise<void>;

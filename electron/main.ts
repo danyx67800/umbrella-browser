@@ -3,19 +3,29 @@ import {
   type DownloadItem, type Session, type MessageBoxOptions
 } from 'electron';
 import { randomUUID } from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import fetch from 'cross-fetch';
 import { ElectronBlocker } from '@ghostery/adblocker-electron';
-import { getDatabase, getDataDirectory, loadDatabase, saveDatabase, type Bookmark, type PersistedTab } from './storage';
+import { parseBookmarkHtml } from './bookmarks';
+import { shouldSuspendTab } from './tab-suspension';
+import { DiscordPresenceController, isValidDiscordClientId } from './discord-presence';
+import { getDatabase, getDataDirectory, loadDatabase, saveDatabase, type Bookmark, type PersistedTab, type SitePermissionName } from './storage';
 import { isSafeWebUrl, resolveNavigation } from './navigation';
 import type { AppSettings } from './storage';
+import { discoverBrowserProfiles, importBrowserProfile, registerCustomBrowserProfile } from './browser-import';
 
 app.setAppUserModelId('com.umbrella.browser');
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) app.quit();
 
 const DEFAULT_PARTITION = 'persist:umbrella';
+const execFileAsync = promisify(execFile);
+const discordPresence = new DiscordPresenceController();
 type Tab = {
   id: string;
   title: string;
@@ -24,6 +34,8 @@ type Tab = {
   audible: boolean;
   incognito: boolean;
   faviconUrl: string | null;
+  suspended: boolean;
+  inactiveSince: number | null;
   view: WebContentsView | null;
 };
 type DownloadRecord = {
@@ -49,22 +61,114 @@ const recentlyClosed: PersistedTab[] = [];
 const downloads = new Map<string, { record: DownloadRecord; item: DownloadItem }>();
 const wiredPartitions = new Set<string>();
 const activeSessions = new Map<string, Session>();
+const blockedRequestsByOrigin = new Map<string, Map<string, number>>();
+let blockedRequestUpdateTimer: NodeJS.Timeout | null = null;
+let tabSuspensionTimer: NodeJS.Timeout | null = null;
 let adBlocker: ElectronBlocker | null = null;
 let adBlockerLoading: Promise<ElectronBlocker> | null = null;
+let trackedAdBlocker: ElectronBlocker | null = null;
 let adBlockReady = false;
 let adBlockError: string | null = null;
-const pendingPermissionRequests = new Map<string, (allowed: boolean) => void>();
+const pendingPermissionRequests = new Map<string, { callback: (allowed: boolean) => void; origin: string; permission: SitePermissionName }>();
+const sitePermissionNames: SitePermissionName[] = ['media', 'geolocation', 'notifications', 'clipboard-read', 'midiSysex'];
 
 const activeTab = () => tabs.find((tab) => tab.id === activeTabId) ?? null;
+const getHttpOrigin = (value: string | null | undefined) => {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.origin : null;
+  } catch {
+    return null;
+  }
+};
 const toTabInfo = (tab: Tab) => ({
   id: tab.id, title: tab.title || 'Nuova scheda', url: tab.url,
   isNewTab: !tab.url, loading: tab.loading,
   canGoBack: !!tab.view?.webContents.canGoBack(),
   canGoForward: !!tab.view?.webContents.canGoForward(),
-  audible: tab.audible, incognito: tab.incognito, faviconUrl: tab.faviconUrl
+  audible: tab.audible, incognito: tab.incognito, faviconUrl: tab.faviconUrl, suspended: tab.suspended
 });
 
 const currentDownloads = () => [...downloads.values()].map(({ record }) => ({ ...record }));
+
+function getSitePrivacyState() {
+  const tab = activeTab();
+  const origin = tab?.incognito ? null : getHttpOrigin(tab?.url);
+  const trackers = origin ? blockedRequestsByOrigin.get(origin) : undefined;
+  return {
+    origin,
+    permissions: origin ? { ...database.settings.sitePermissions[origin] } : {},
+    adBlockEnabled: database.settings.adBlockEnabled,
+    adBlockExcluded: origin ? database.settings.adBlockExcludedSites.includes(origin) : false,
+    blockedTrackers: trackers
+      ? [...trackers.entries()].map(([hostname, count]) => ({ hostname, count })).sort((left, right) => right.count - left.count).slice(0, 20)
+      : []
+  };
+}
+
+function isSiteAdBlockExcluded(origin: string | null) {
+  return !!origin && database.settings.adBlockExcludedSites.includes(origin);
+}
+
+function recordBlockedRequest(origin: string, requestUrl: string) {
+  let hostname = '';
+  try { hostname = new URL(requestUrl).hostname; } catch { return; }
+  if (!hostname) return;
+  let trackers = blockedRequestsByOrigin.get(origin);
+  if (!trackers) {
+    trackers = new Map();
+    blockedRequestsByOrigin.set(origin, trackers);
+  }
+  trackers.set(hostname, (trackers.get(hostname) ?? 0) + 1);
+  if (trackers.size > 100) {
+    const leastRecent = trackers.keys().next().value;
+    if (leastRecent) trackers.delete(leastRecent);
+  }
+  if (blockedRequestsByOrigin.size > 100) {
+    const leastRecentOrigin = blockedRequestsByOrigin.keys().next().value;
+    if (leastRecentOrigin && leastRecentOrigin !== origin) blockedRequestsByOrigin.delete(leastRecentOrigin);
+  }
+  if (blockedRequestUpdateTimer) return;
+  blockedRequestUpdateTimer = setTimeout(() => {
+    blockedRequestUpdateTimer = null;
+    emitState();
+  }, 500);
+}
+
+function installAdBlockerTracking(blocker: ElectronBlocker) {
+  const originalBeforeRequest = blocker.onBeforeRequest.bind(blocker);
+  const originalHeadersReceived = blocker.onHeadersReceived.bind(blocker);
+  const originalInjectCosmetics = blocker.onInjectCosmeticFilters.bind(blocker);
+
+  blocker.onBeforeRequest = (details, callback) => {
+    const tab = tabs.find((item) => item.view?.webContents.id === details.webContentsId);
+    const origin = tab?.incognito ? null : (details.resourceType === 'mainFrame' ? getHttpOrigin(details.url) : null)
+      ?? getHttpOrigin(tab?.url) ?? getHttpOrigin(details.initiatorOrigin) ?? getHttpOrigin(details.referrer);
+    if (isSiteAdBlockExcluded(origin)) {
+      callback({});
+      return;
+    }
+    originalBeforeRequest(details, (response) => {
+      if (response.cancel && origin) recordBlockedRequest(origin, details.url);
+      callback(response);
+    });
+  };
+  blocker.onHeadersReceived = (details, callback) => {
+    const tab = tabs.find((item) => item.view?.webContents.id === details.webContentsId);
+    const origin = tab?.incognito ? null : (details.resourceType === 'mainFrame' ? getHttpOrigin(details.url) : null)
+      ?? getHttpOrigin(tab?.url) ?? getHttpOrigin(details.initiatorOrigin) ?? getHttpOrigin(details.referrer);
+    if (isSiteAdBlockExcluded(origin)) {
+      callback({});
+      return;
+    }
+    originalHeadersReceived(details, callback);
+  };
+  blocker.onInjectCosmeticFilters = (event, url, message) => {
+    if (isSiteAdBlockExcluded(getHttpOrigin(url))) return Promise.resolve();
+    return originalInjectCosmetics(event, url, message);
+  };
+}
 
 function getExtensionsInfo() {
   return database.extensions.map(({ id, name, version, enabled, path }) => ({
@@ -138,6 +242,10 @@ async function syncAdBlocker() {
       }
       adBlocker = await adBlockerLoading;
     }
+    if (trackedAdBlocker !== adBlocker) {
+      installAdBlockerTracking(adBlocker);
+      trackedAdBlocker = adBlocker;
+    }
     // Respect a toggle changed while the filter engine was being loaded.
     if (!database.settings.adBlockEnabled) {
       for (const ses of activeSessions.values()) adBlocker.disableBlockingInSession(ses);
@@ -197,7 +305,8 @@ function emitState() {
     wallpaperUrl: getWallpaperUrl(),
     extensions: getExtensionsInfo(),
     adBlockReady,
-    adBlockError
+    adBlockError,
+    sitePrivacy: getSitePrivacyState()
   });
 }
 
@@ -209,7 +318,7 @@ function persistSession() {
   saveDatabase();
 }
 
-function updateTab(tab: Tab, patch: Partial<Pick<Tab, 'title' | 'url' | 'loading' | 'audible' | 'faviconUrl'>>) {
+function updateTab(tab: Tab, patch: Partial<Pick<Tab, 'title' | 'url' | 'loading' | 'audible' | 'faviconUrl' | 'suspended'>>) {
   Object.assign(tab, patch);
   emitState();
 }
@@ -297,18 +406,21 @@ function configureSession(partition: string, isPrivate: boolean) {
 
   ses.on('will-download', (_event, item) => handleDownload(ses, item, isPrivate));
   ses.setPermissionRequestHandler((webContents, permission, callback, details) => {
-    const supported = new Set(['media', 'geolocation', 'notifications', 'clipboard-read', 'midiSysex']);
-    if (!supported.has(permission) || isPrivate) return callback(false);
+    const supportedPermission = sitePermissionNames.find((item) => item === permission);
+    if (!supportedPermission || isPrivate) return callback(false);
     if (!mainWindow || mainWindow.isDestroyed()) return callback(false);
-
+    const origin = getHttpOrigin(details.requestingUrl);
+    if (!origin) return callback(false);
+    const savedDecision = database.settings.sitePermissions[origin]?.[supportedPermission];
+    if (typeof savedDecision === 'boolean') return callback(savedDecision);
     const id = randomUUID();
-    pendingPermissionRequests.set(id, callback);
-    let hostname = details.requestingUrl;
-    try { hostname = new URL(details.requestingUrl).hostname || details.requestingUrl; } catch {}
+    pendingPermissionRequests.set(id, { callback, origin, permission: supportedPermission });
+    let hostname = origin;
+    try { hostname = new URL(origin).hostname || origin; } catch {}
     mainWindow.webContents.send('permissions:request', {
       id,
-      permission,
-      origin: details.requestingUrl,
+      permission: supportedPermission,
+      origin,
       hostname
     });
   });
@@ -363,6 +475,7 @@ function createPageView(tab: Tab): WebContentsView | null {
       updateTab(tab, { url });
       persistSession();
     }
+
   });
   contents.on('render-process-gone', () => updateTab(tab, { loading: false }));
   contents.on('before-input-event', (event, input) => {
@@ -385,6 +498,7 @@ function loadTab(tab: Tab) {
   const view = createPageView(tab);
   if (!view) return;
   tab.loading = true;
+  tab.suspended = false;
   void view.webContents.loadURL(tab.url).catch((error: unknown) => {
     console.warn('[Umbrella] Navigation failed:', error);
     updateTab(tab, { loading: false });
@@ -392,9 +506,11 @@ function loadTab(tab: Tab) {
 }
 
 function createTab(url?: string, incognito = false, loadImmediately = true) {
+  const previous = activeTab();
+  if (previous) previous.inactiveSince = Date.now();
   const tab: Tab = {
     id: randomUUID(), title: url ? url : 'Nuova scheda', url: url ?? '',
-    loading: false, audible: false, incognito, faviconUrl: null, view: null
+    loading: false, audible: false, incognito, faviconUrl: null, suspended: false, inactiveSince: null, view: null
   };
   tabs.push(tab);
   activeTabId = tab.id;
@@ -408,7 +524,10 @@ function createTab(url?: string, incognito = false, loadImmediately = true) {
 function switchTab(id: string) {
   const tab = tabs.find((item) => item.id === id);
   if (!tab) return;
+  const previous = activeTab();
+  if (previous && previous.id !== id) previous.inactiveSince = Date.now();
   activeTabId = id;
+  tab.inactiveSince = null;
   loadTab(tab);
   applyContentViewVisibility();
   emitState();
@@ -429,7 +548,14 @@ function closeTab(id: string) {
     tab.view = null;
     if (!closingContents.isDestroyed()) closingContents.close({ waitForBeforeUnload: false });
   }
-  if (wasActive) activeTabId = tabs[Math.min(index, tabs.length - 1)]?.id ?? '';
+  if (wasActive) {
+    const next = tabs[Math.min(index, tabs.length - 1)];
+    activeTabId = next?.id ?? '';
+    if (next) {
+      next.inactiveSince = null;
+      loadTab(next);
+    }
+  }
   if (!tabs.length) {
     createTab();
     return;
@@ -439,6 +565,31 @@ function closeTab(id: string) {
   persistSession();
 }
 
+function suspendTab(tab: Tab) {
+  const view = tab.view;
+  if (!view) return;
+  view.setVisible(false);
+  try { mainWindow?.contentView.removeChildView(view); } catch { /* already detached */ }
+  tab.view = null;
+  tab.loading = false;
+  tab.audible = false;
+  tab.suspended = true;
+  if (!view.webContents.isDestroyed()) view.webContents.close({ waitForBeforeUnload: false });
+  emitState();
+}
+
+function suspendInactiveTabs() {
+  const minutes = database.settings.tabSuspendAfterMinutes;
+  if (!minutes) return;
+  const now = Date.now();
+  for (const tab of tabs) {
+    if (!shouldSuspendTab(tab, activeTabId, minutes, now)) continue;
+    const contents = tab.view?.webContents;
+    if (!contents || contents.isDestroyed() || contents.isCurrentlyAudible()) continue;
+    suspendTab(tab);
+  }
+}
+
 function navigate(input: string, tabId?: string) {
   let tab = tabs.find((candidate) => candidate.id === tabId) ?? activeTab();
   if (!tab) {
@@ -446,13 +597,20 @@ function navigate(input: string, tabId?: string) {
     tab = activeTab();
   }
   if (!tab) return;
-  const url = resolveNavigation(input);
+  const url = resolveNavigation(input, database.settings.theme);
   if (!isSafeWebUrl(url)) return;
+  if (tab.id !== activeTabId) {
+    const previous = activeTab();
+    if (previous) previous.inactiveSince = Date.now();
+    activeTabId = tab.id;
+    tab.inactiveSince = null;
+  }
   if (!tab.view) createPageView(tab);
   tab.url = url;
   tab.title = url;
   tab.loading = true;
   tab.audible = false;
+  tab.suspended = false;
   tab.faviconUrl = null;
   if (tab.id !== activeTabId) activeTabId = tab.id;
   applyContentViewVisibility();
@@ -498,8 +656,13 @@ function createWindow() {
 
   if (!tabs.length) {
     const saved = database.settings.restoreSession ? database.lastSession.filter((tab) => isSafeWebUrl(tab.url)) : [];
-    if (saved.length) saved.forEach((tab, index) => createTab(tab.url, false, index === saved.length - 1));
-    else createTab();
+    if (saved.length) {
+      saved.forEach((tab, index) => createTab(tab.url, false, index === saved.length - 1));
+      const launchUrl = process.argv.find(isSafeWebUrl);
+      if (launchUrl) createTab(launchUrl);
+    } else {
+      createTab(process.argv.find(isSafeWebUrl));
+    }
   } else {
     applyContentViewVisibility();
   }
@@ -512,7 +675,8 @@ ipcMain.handle('browser:get-state', () => ({
   bookmarks: database.bookmarks,
   history: database.history.slice(0, 500),
   downloads: currentDownloads(), settings: database.settings,
-  wallpaperUrl: getWallpaperUrl(), extensions: getExtensionsInfo(), adBlockReady, adBlockError
+  wallpaperUrl: getWallpaperUrl(), extensions: getExtensionsInfo(), adBlockReady, adBlockError,
+  sitePrivacy: getSitePrivacyState()
 }));
 ipcMain.on('browser:set-content-bounds', (_event, bounds: ContentBounds) => {
   if (!bounds || ![bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isFinite)) return;
@@ -521,10 +685,41 @@ ipcMain.on('browser:set-content-bounds', (_event, bounds: ContentBounds) => {
 });
 ipcMain.handle('permissions:respond', (_event, payload: { id?: string; allowed?: boolean }) => {
   if (!payload?.id || typeof payload.allowed !== 'boolean') return false;
-  const callback = pendingPermissionRequests.get(payload.id);
-  if (!callback) return false;
+  const request = pendingPermissionRequests.get(payload.id);
+  if (!request) return false;
   pendingPermissionRequests.delete(payload.id);
-  callback(payload.allowed);
+  database.settings.sitePermissions[request.origin] = {
+    ...database.settings.sitePermissions[request.origin],
+    [request.permission]: payload.allowed
+  };
+  saveDatabase();
+  request.callback(payload.allowed);
+  emitState();
+  return true;
+});
+ipcMain.handle('privacy:set-site-permission', (_event, payload: { origin?: string; permission?: SitePermissionName; allowed?: boolean | null }) => {
+  const origin = payload?.origin;
+  const permission = sitePermissionNames.find((item) => item === payload?.permission);
+  if (!origin || getHttpOrigin(origin) !== origin || activeTab()?.incognito || getHttpOrigin(activeTab()?.url) !== origin || !permission) return false;
+  if (payload.allowed !== null && typeof payload.allowed !== 'boolean') return false;
+  const overrides = { ...database.settings.sitePermissions[origin] };
+  if (payload.allowed === null) delete overrides[permission];
+  else overrides[permission] = payload.allowed;
+  if (Object.keys(overrides).length) database.settings.sitePermissions[origin] = overrides;
+  else delete database.settings.sitePermissions[origin];
+  saveDatabase();
+  emitState();
+  return true;
+});
+ipcMain.handle('privacy:set-site-adblock-excluded', (_event, payload: { origin?: string; excluded?: boolean }) => {
+  const origin = payload?.origin;
+  if (!origin || getHttpOrigin(origin) !== origin || activeTab()?.incognito || getHttpOrigin(activeTab()?.url) !== origin || typeof payload.excluded !== 'boolean') return false;
+  const exclusions = new Set(database.settings.adBlockExcludedSites);
+  if (payload.excluded) exclusions.add(origin);
+  else exclusions.delete(origin);
+  database.settings.adBlockExcludedSites = [...exclusions];
+  saveDatabase();
+  emitState();
   return true;
 });
 ipcMain.handle('browser:navigate', (_event, payload: { input: string; tabId?: string }) => {
@@ -631,11 +826,276 @@ ipcMain.handle('settings:update', async (_event, patch: Partial<AppSettings>) =>
   if (typeof patch.askDownloadLocation === 'boolean') allowed.askDownloadLocation = patch.askDownloadLocation;
   if (typeof patch.downloadNotifications === 'boolean') allowed.downloadNotifications = patch.downloadNotifications;
   if (typeof patch.adBlockEnabled === 'boolean') allowed.adBlockEnabled = patch.adBlockEnabled;
+  if (typeof patch.onboardingCompleted === 'boolean') allowed.onboardingCompleted = patch.onboardingCompleted;
+  if (typeof patch.discordClientId === 'string') {
+    const clientId = patch.discordClientId.trim();
+    if (!clientId || isValidDiscordClientId(clientId)) allowed.discordClientId = clientId;
+  }
+  if (typeof patch.discordActivityEnabled === 'boolean') {
+    const clientId = allowed.discordClientId ?? database.settings.discordClientId;
+    if (!patch.discordActivityEnabled || isValidDiscordClientId(clientId)) {
+      allowed.discordActivityEnabled = patch.discordActivityEnabled;
+    }
+  }
+  if (typeof patch.performanceModeEnabled === 'boolean') allowed.performanceModeEnabled = patch.performanceModeEnabled;
+  if (typeof patch.tabSuspendAfterMinutes === 'number' && [0, 5, 15, 30, 60].includes(patch.tabSuspendAfterMinutes)) {
+    allowed.tabSuspendAfterMinutes = patch.tabSuspendAfterMinutes;
+  }
   database.settings = { ...database.settings, ...allowed };
+  if (typeof patch.theme === 'string') nativeTheme.themeSource = database.settings.theme;
   saveDatabase();
   if (typeof patch.adBlockEnabled === 'boolean') await syncAdBlocker();
+  discordPresence.sync(database.settings);
   emitState();
   return database.settings;
+});
+function getProtocolRegistrationTarget() {
+  // `electron .` in development needs the app entry path; packaged builds use
+  // their own executable directly. The same tuple is used for register/check.
+  if (process.defaultApp && process.argv[1]) {
+    return { executable: process.execPath, args: [resolve(process.argv[1])] };
+  }
+  return { executable: process.execPath, args: [] as string[] };
+}
+
+async function writeRegistryString(key: string, valueName: string | null, value: string) {
+  const args = ['add', key, ...(valueName ? ['/v', valueName] : ['/ve']), '/t', 'REG_SZ', '/d', value, '/f'];
+  await execFileAsync('reg.exe', args, { windowsHide: true });
+}
+
+async function registerWindowsBrowserCapabilities(): Promise<boolean> {
+  if (process.platform !== 'win32') return false;
+  const { executable, args } = getProtocolRegistrationTarget();
+  const launchCommand = `"${executable}"${args.length ? ` "${args[0]}"` : ''} -- "%1"`;
+  const icon = `"${executable}",0`;
+  const capabilities = 'HKCU\\Software\\Umbrella\\Capabilities';
+  const urlAssociations = `${capabilities}\\URLAssociations`;
+  const fileAssociations = `${capabilities}\\FileAssociations`;
+  const startMenu = 'HKCU\\Software\\Clients\\StartMenuInternet\\Umbrella';
+
+  try {
+    // Register the browser as a candidate. Windows still requires the user to
+    // confirm HTTP/HTTPS in Settings; Umbrella never changes this silently.
+    const registryEntries: Array<[string, string | null, string]> = [
+      ['HKCU\\Software\\Classes\\UmbrellaURL', null, 'Umbrella URL'],
+      ['HKCU\\Software\\Classes\\UmbrellaURL', 'URL Protocol', ''],
+      ['HKCU\\Software\\Classes\\UmbrellaURL\\DefaultIcon', null, icon],
+      ['HKCU\\Software\\Classes\\UmbrellaURL\\shell\\open\\command', null, launchCommand],
+      ['HKCU\\Software\\Classes\\UmbrellaHTML', null, 'Umbrella HTML Document'],
+      ['HKCU\\Software\\Classes\\UmbrellaHTML\\DefaultIcon', null, icon],
+      ['HKCU\\Software\\Classes\\UmbrellaHTML\\shell\\open\\command', null, launchCommand],
+      [capabilities, 'ApplicationName', 'Umbrella'],
+      [capabilities, 'ApplicationDescription', 'Umbrella è un browser desktop basato su Chromium.'],
+      [capabilities, 'ApplicationIcon', icon],
+      [urlAssociations, 'http', 'UmbrellaURL'],
+      [urlAssociations, 'https', 'UmbrellaURL'],
+      [fileAssociations, '.htm', 'UmbrellaHTML'],
+      [fileAssociations, '.html', 'UmbrellaHTML'],
+      [startMenu, null, 'Umbrella'],
+      [`${startMenu}\\DefaultIcon`, null, icon],
+      [`${startMenu}\\shell\\open\\command`, null, launchCommand],
+      [`${startMenu}\\Capabilities`, 'ApplicationName', 'Umbrella'],
+      [`${startMenu}\\Capabilities`, 'ApplicationDescription', 'Umbrella è un browser desktop basato su Chromium.'],
+      [`${startMenu}\\Capabilities`, 'ApplicationIcon', icon],
+      [`${startMenu}\\Capabilities\\URLAssociations`, 'http', 'UmbrellaURL'],
+      [`${startMenu}\\Capabilities\\URLAssociations`, 'https', 'UmbrellaURL'],
+      [`${startMenu}\\Capabilities\\FileAssociations`, '.htm', 'UmbrellaHTML'],
+      [`${startMenu}\\Capabilities\\FileAssociations`, '.html', 'UmbrellaHTML'],
+      ['HKCU\\Software\\RegisteredApplications', 'Umbrella', 'Software\\Umbrella\\Capabilities']
+    ];
+    for (const [key, name, value] of registryEntries) await writeRegistryString(key, name, value);
+
+    // Register HTTP and HTTPS handlers for Windows' chooser, not as a forced
+    // default. The OS owns the final default-app selection.
+    app.setAsDefaultProtocolClient('http', executable, args);
+    app.setAsDefaultProtocolClient('https', executable, args);
+    // Ask Windows to refresh its list of handlers so Umbrella appears in Settings.
+    try {
+      const notify = `Add-Type -Namespace UmbrellaNative -Name Shell -MemberDefinition '[System.Runtime.InteropServices.DllImport("shell32.dll")] public static extern void SHChangeNotify(int eventId, uint flags, System.IntPtr item1, System.IntPtr item2);'; [UmbrellaNative.Shell]::SHChangeNotify(0x08000000, 0x00001000, [IntPtr]::Zero, [IntPtr]::Zero)`;
+      await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', notify], { windowsHide: true, timeout: 4000 });
+    } catch (notifyError) {
+      console.warn('[Umbrella] Windows association refresh notification failed:', notifyError);
+    }
+    return true;
+  } catch (error) {
+    console.error('[Umbrella] Windows browser registration failed:', error);
+    return false;
+  }
+}
+
+async function isUmbrellaRegistered(): Promise<boolean> {
+  if (process.platform !== 'win32') return false;
+  try {
+    const { stdout } = await execFileAsync('reg.exe', [
+      'query', 'HKCU\\Software\\RegisteredApplications', '/v', 'Umbrella'
+    ], { windowsHide: true });
+    return /Umbrella\s+REG_SZ\s+Software\\Umbrella\\Capabilities/i.test(stdout);
+  } catch {
+    return false;
+  }
+}
+
+async function isUmbrellaDefaultBrowser(): Promise<boolean> {
+  if (process.platform === 'win32') {
+    // Windows 10/11 stores the user's chosen handler in UserChoice. Checking
+    // these ProgIDs avoids mistaking mere protocol registration for a real
+    // default-browser selection.
+    try {
+      const readProgId = async (protocol: 'http' | 'https') => {
+        const key = `HKCU\\Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\${protocol}\\UserChoice`;
+        const { stdout } = await execFileAsync('reg.exe', ['query', key, '/v', 'ProgId'], { windowsHide: true });
+        return stdout.match(/ProgId\s+REG_SZ\s+([^\r\n]+)/i)?.[1]?.trim() ?? '';
+      };
+      const [httpProgId, httpsProgId] = await Promise.all([readProgId('http'), readProgId('https')]);
+      return httpProgId === 'UmbrellaURL' && httpsProgId === 'UmbrellaURL';
+    } catch {
+      return false;
+    }
+  }
+  const { executable, args } = getProtocolRegistrationTarget();
+  return app.isDefaultProtocolClient('http', executable, args)
+    && app.isDefaultProtocolClient('https', executable, args);
+}
+
+ipcMain.handle('browser:set-default', async () => {
+  if (process.platform !== 'win32') {
+    return { registered: false, isDefault: await isUmbrellaDefaultBrowser(), settingsOpened: false, message: 'La selezione del browser predefinito è gestita dal sistema operativo.' };
+  }
+  const registered = await registerWindowsBrowserCapabilities();
+  let settingsOpened = false;
+  try {
+    await shell.openExternal('ms-settings:defaultapps?registeredAppUser=Umbrella');
+    settingsOpened = true;
+  } catch (error) {
+    console.error('[Umbrella] Could not open Umbrella default-app settings:', error);
+    try {
+      await shell.openExternal('ms-settings:defaultapps');
+      settingsOpened = true;
+    } catch (fallbackError) {
+      console.error('[Umbrella] Could not open the general default-app settings:', fallbackError);
+    }
+  }
+  return {
+    registered,
+    isDefault: await isUmbrellaDefaultBrowser(),
+    settingsOpened,
+    message: registered
+      ? 'Umbrella è registrato in Windows. Selezionalo nella pagina che si è aperta e assegna HTTP e HTTPS.'
+      : 'La registrazione automatica non è riuscita. Puoi comunque cercare Umbrella nelle app predefinite di Windows.'
+  };
+});
+
+ipcMain.handle('browser:check-default', async () => {
+  const isDefault = await isUmbrellaDefaultBrowser();
+  return {
+    registered: await isUmbrellaRegistered(),
+    isDefault,
+    settingsOpened: false,
+    message: isDefault
+      ? 'Umbrella è il browser predefinito per HTTP e HTTPS.'
+      : 'Umbrella non risulta ancora il browser predefinito.'
+  };
+});
+
+ipcMain.handle('discord:open-developer-portal', async () => {
+  try {
+    await shell.openExternal('https://discord.com/developers/applications');
+    return true;
+  } catch (error) {
+    console.error('[Umbrella] Could not open the Discord Developer Portal:', error);
+    return false;
+  }
+});
+
+ipcMain.handle('browser:scan-import-sources', () => discoverBrowserProfiles());
+
+ipcMain.handle('browser:choose-custom-import-source', async () => {
+  const options = {
+    title: 'Seleziona la cartella del profilo browser',
+    buttonLabel: 'Usa questa cartella',
+    properties: ['openDirectory'] as Array<'openDirectory'>,
+    message: 'Scegli la cartella User Data, Profiles o quella del singolo profilo. Umbrella legge solo i dati compatibili.'
+  };
+  const selection = mainWindow && !mainWindow.isDestroyed()
+    ? await dialog.showOpenDialog(mainWindow, options)
+    : await dialog.showOpenDialog(options);
+  if (selection.canceled || !selection.filePaths[0]) return null;
+  return registerCustomBrowserProfile(selection.filePaths[0]);
+});
+
+ipcMain.handle('browser:import-profile', (_event, payload: {
+  browserId: string;
+  profileId: string;
+  options: { bookmarks: boolean; history: boolean };
+}) => {
+  if (!payload || typeof payload.browserId !== 'string' || typeof payload.profileId !== 'string'
+    || typeof payload.options?.bookmarks !== 'boolean' || typeof payload.options?.history !== 'boolean'
+    || (!payload.options.bookmarks && !payload.options.history)) {
+    return { ok: false, bookmarksImported: 0, historyImported: 0, message: 'Seleziona almeno un tipo di dato da importare.', warnings: [] };
+  }
+  try {
+    const extracted = importBrowserProfile(payload.browserId, payload.profileId, payload.options);
+    const existingBookmarks = new Set(database.bookmarks.map((bookmark) => bookmark.url));
+    let bookmarksImported = 0;
+    for (const item of extracted.bookmarks) {
+      if (!isSafeWebUrl(item.url) || existingBookmarks.has(item.url)) continue;
+      database.bookmarks.push({
+        id: randomUUID(),
+        title: String(item.title || item.url).slice(0, 160),
+        url: item.url,
+        createdAt: Date.now()
+      });
+      existingBookmarks.add(item.url);
+      bookmarksImported += 1;
+    }
+
+    const existingVisits = new Set(database.history.map((visit) => `${visit.url}|${visit.visitedAt}`));
+    let historyImported = 0;
+    for (const item of extracted.history) {
+      if (!isSafeWebUrl(item.url) || !Number.isFinite(item.visitedAt) || item.visitedAt <= 0 || item.visitedAt > Date.now() + 60_000) continue;
+      const key = `${item.url}|${item.visitedAt}`;
+      if (existingVisits.has(key)) continue;
+      database.history.push({
+        id: randomUUID(),
+        title: String(item.title || item.url).slice(0, 160),
+        url: item.url,
+        visitedAt: item.visitedAt
+      });
+      existingVisits.add(key);
+      historyImported += 1;
+    }
+    if (bookmarksImported || historyImported) {
+      database.history.sort((a, b) => b.visitedAt - a.visitedAt);
+      database.history = database.history.slice(0, 5000);
+      saveDatabase();
+      emitState();
+    }
+    const importedSomething = bookmarksImported > 0 || historyImported > 0;
+    const summary = [
+      bookmarksImported ? `${bookmarksImported} preferiti` : '',
+      historyImported ? `${historyImported} voci di cronologia` : ''
+    ].filter(Boolean).join(' e ');
+    return {
+      ok: importedSomething,
+      bookmarksImported,
+      historyImported,
+      browserName: extracted.browserName,
+      profileName: extracted.profileName,
+      warnings: extracted.warnings,
+      message: importedSomething
+        ? `Importati ${summary} da ${extracted.browserName} · ${extracted.profileName}.`
+        : extracted.warnings.length
+          ? 'Non è stato possibile importare i dati selezionati. Controlla i dettagli.'
+          : 'Non sono stati trovati nuovi dati da importare. I duplicati vengono ignorati.'
+    };
+  } catch (error) {
+    console.error('[Umbrella] Browser data import failed:', error);
+    return {
+      ok: false, bookmarksImported: 0, historyImported: 0,
+      message: error instanceof Error ? error.message : 'Importazione non riuscita.',
+      warnings: []
+    };
+  }
 });
 
 ipcMain.handle('wallpaper:choose', async () => {
@@ -875,25 +1335,55 @@ ipcMain.handle('bookmarks:export', async () => {
 ipcMain.handle('bookmarks:import', async () => {
   const openChoice = mainWindow && !mainWindow.isDestroyed()
     ? dialog.showOpenDialog(mainWindow, {
-    title: 'Importa preferiti', properties: ['openFile'],
-    filters: [{ name: 'JSON', extensions: ['json'] }]
+    title: 'Importa preferiti da un browser',
+    properties: ['openFile'],
+    filters: [{ name: 'Preferiti HTML o JSON', extensions: ['html', 'htm', 'json'] }]
   })
     : dialog.showOpenDialog({
-      title: 'Importa preferiti', properties: ['openFile'],
-      filters: [{ name: 'JSON', extensions: ['json'] }]
+      title: 'Importa preferiti da un browser',
+      properties: ['openFile'],
+      filters: [{ name: 'Preferiti HTML o JSON', extensions: ['html', 'htm', 'json'] }]
     });
   const choice = await openChoice;
-  if (choice.canceled || !choice.filePaths[0]) return false;
+  if (choice.canceled || !choice.filePaths[0]) {
+    return { ok: false, count: 0, message: 'Importazione annullata.' };
+  }
   try {
-    const data = JSON.parse(readFileSync(choice.filePaths[0], 'utf8')) as Partial<Bookmark[]>;
-    if (!Array.isArray(data)) return false;
-    const imported = data.filter((item): item is Bookmark => !!item && typeof item.url === 'string' && isSafeWebUrl(item.url));
-    const existing = new Set(database.bookmarks.map((item) => item.url));
-    for (const item of imported) {
-      if (!existing.has(item.url)) database.bookmarks.push({ id: randomUUID(), title: String(item.title || item.url), url: item.url, createdAt: Date.now() });
+    const filePath = choice.filePaths[0];
+    if (statSync(filePath).size > 25 * 1024 * 1024) {
+      return { ok: false, count: 0, message: 'Il file dei preferiti supera il limite di 25 MB.' };
     }
-    saveDatabase(); emitState(); return true;
-  } catch { return false; }
+    const fileContents = readFileSync(filePath, 'utf8');
+    const extension = extname(filePath).toLowerCase();
+    const imported = extension === '.json'
+      ? (JSON.parse(fileContents) as Partial<Bookmark[]>)
+      : parseBookmarkHtml(fileContents);
+    if (!Array.isArray(imported)) {
+      return { ok: false, count: 0, message: 'Il file non contiene un elenco di preferiti valido.' };
+    }
+    const existing = new Set(database.bookmarks.map((item) => item.url));
+    let count = 0;
+    for (const item of imported) {
+      if (!item || typeof item.url !== 'string' || !isSafeWebUrl(item.url) || existing.has(item.url)) continue;
+      database.bookmarks.push({
+        id: randomUUID(),
+        title: String(item.title || item.url).slice(0, 160),
+        url: item.url,
+        createdAt: Date.now()
+      });
+      existing.add(item.url);
+      count += 1;
+    }
+    if (count === 0) {
+      return { ok: false, count: 0, message: 'Nel file non sono stati trovati nuovi preferiti web da importare.' };
+    }
+    saveDatabase();
+    emitState();
+    return { ok: true, count, message: `${count} preferiti importati.` };
+  } catch (error) {
+    console.error('[Umbrella] Could not import bookmarks:', error);
+    return { ok: false, count: 0, message: 'Impossibile leggere il file dei preferiti. Controlla che sia un HTML o JSON valido.' };
+  }
 });
 
 ipcMain.handle('window:action', (_event, action: string) => {
@@ -903,8 +1393,26 @@ ipcMain.handle('window:action', (_event, action: string) => {
   else if (action === 'close') mainWindow.close();
 });
 
+app.on('second-instance', (_event, commandLine) => {
+  const externalUrl = commandLine.find((argument) => isSafeWebUrl(argument));
+  if (!externalUrl) return;
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  }
+  navigate(externalUrl);
+});
+
 app.whenReady().then(async () => {
+  if (!hasSingleInstanceLock) return;
   database = loadDatabase();
+  tabSuspensionTimer = setInterval(suspendInactiveTabs, 30_000);
+  discordPresence.sync(database.settings);
+  nativeTheme.themeSource = database.settings.theme;
+  // Make Umbrella visible in Windows' Default apps chooser before the user asks
+  // to select it; this only registers capabilities and never takes ownership.
+  if (process.platform === 'win32') void registerWindowsBrowserCapabilities();
   configureSession(DEFAULT_PARTITION, false);
   await restoreInstalledExtensions();
   createWindow();
@@ -913,5 +1421,12 @@ app.whenReady().then(async () => {
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
   nativeTheme.on('updated', emitState);
 });
-app.on('before-quit', () => persistSession());
+app.on('before-quit', () => {
+  if (tabSuspensionTimer) clearInterval(tabSuspensionTimer);
+  if (blockedRequestUpdateTimer) clearTimeout(blockedRequestUpdateTimer);
+  for (const request of pendingPermissionRequests.values()) request.callback(false);
+  pendingPermissionRequests.clear();
+  persistSession();
+  void discordPresence.dispose();
+});
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
