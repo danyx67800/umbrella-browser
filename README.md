@@ -2,6 +2,10 @@
 
 **Umbrella 0.4.4** è un browser desktop Windows basato su Electron, Chromium, React e TypeScript. Include modalità performance, controlli privacy per sito e sospensione delle schede inattive, oltre alla Discord Activity e alle funzionalità di primo avvio e trasferimento dati browser.
 
+## Download
+
+Scarica l'ultima versione per Windows x64 dalla pagina [Releases](https://github.com/perosss03-spec/umbrella-browser/releases/latest). Scegli **Umbrella Setup** per installare il browser oppure **Umbrella portable** per avviarlo senza installazione. Le build attuali non sono firmate digitalmente; Windows potrebbe mostrare un avviso di sicurezza.
+
 ## Stack
 
 - Electron 45.4.1 / Chromium 156 / Node.js integrato 24.22.3.
