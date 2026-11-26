@@ -43,6 +43,12 @@ export default function App() {
     setAddress(activeTab && !activeTab.isNewTab ? activeTab.url : '');
   }, [activeTab?.id, activeTab?.url, activeTab?.isNewTab]);
 
+  // A permission prompt belongs to the page that requested it. Keeping it on screen
+  // after switching tabs would let the user answer for a different site.
+  useEffect(() => {
+    setPermissionRequest(null);
+  }, [state?.activeTabId]);
+
   useEffect(() => {
     const offFocus = window.umbrella.onFocusAddress(() => window.dispatchEvent(new Event('umbrella:focus-address')));
     const offFind = window.umbrella.onFindRequest(() => setFindOpen(true));
