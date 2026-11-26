@@ -18,6 +18,7 @@ import { getDatabase, getDataDirectory, loadDatabase, saveDatabase, type Bookmar
 import { isSafeWebUrl, resolveNavigation } from './navigation';
 import type { AppSettings } from './storage';
 import { discoverBrowserProfiles, importBrowserProfile, registerCustomBrowserProfile } from './browser-import';
+import { PendingPermissionRegistry } from './pending-permissions';
 
 app.setAppUserModelId('com.umbrella.browser');
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
@@ -69,7 +70,12 @@ let adBlockerLoading: Promise<ElectronBlocker> | null = null;
 let trackedAdBlocker: ElectronBlocker | null = null;
 let adBlockReady = false;
 let adBlockError: string | null = null;
-const pendingPermissionRequests = new Map<string, { callback: (allowed: boolean) => void; origin: string; permission: SitePermissionName }>();
+type PendingPermissionRequest = { callback: (allowed: boolean) => void; origin: string; permission: SitePermissionName };
+// Chromium keeps the page blocked until this callback runs, so a request must never
+// stay pending forever: it is answered, cancelled with its tab, or expired.
+const PERMISSION_REQUEST_MAX_AGE_MS = 60_000;
+const pendingPermissionRequests = new PendingPermissionRegistry<PendingPermissionRequest>(PERMISSION_REQUEST_MAX_AGE_MS);
+let permissionRequestSweepTimer: NodeJS.Timeout | null = null;
 const sitePermissionNames: SitePermissionName[] = ['media', 'geolocation', 'notifications', 'clipboard-read', 'midiSysex'];
 
 const activeTab = () => tabs.find((tab) => tab.id === activeTabId) ?? null;
@@ -105,6 +111,14 @@ function getSitePrivacyState() {
       ? [...trackers.entries()].map(([hostname, count]) => ({ hostname, count })).sort((left, right) => right.count - left.count).slice(0, 20)
       : []
   };
+}
+
+function denyPendingPermissions(entries: Array<{ id: string; value: PendingPermissionRequest }>) {
+  if (!entries.length) return;
+  for (const { value } of entries) value.callback(false);
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('permissions:cancelled', entries.map(({ id }) => id));
+  }
 }
 
 function isSiteAdBlockExcluded(origin: string | null) {
@@ -414,7 +428,8 @@ function configureSession(partition: string, isPrivate: boolean) {
     const savedDecision = database.settings.sitePermissions[origin]?.[supportedPermission];
     if (typeof savedDecision === 'boolean') return callback(savedDecision);
     const id = randomUUID();
-    pendingPermissionRequests.set(id, { callback, origin, permission: supportedPermission });
+    const tabId = tabs.find((tab) => tab.view?.webContents.id === webContents.id)?.id ?? '';
+    pendingPermissionRequests.add(id, tabId, { callback, origin, permission: supportedPermission });
     let hostname = origin;
     try { hostname = new URL(origin).hostname || origin; } catch {}
     mainWindow.webContents.send('permissions:request', {
@@ -466,6 +481,7 @@ function createPageView(tab: Tab): WebContentsView | null {
   contents.on('media-started-playing', () => updateTab(tab, { audible: true }));
   contents.on('media-paused', () => updateTab(tab, { audible: false }));
   contents.on('did-navigate', (_event, url) => {
+    denyPendingPermissions(pendingPermissionRequests.cancelForTab(tab.id));
     updateTab(tab, { url, title: contents.getTitle() || url, loading: false });
     addHistory(tab);
     persistSession();
@@ -537,6 +553,7 @@ function closeTab(id: string) {
   const index = tabs.findIndex((tab) => tab.id === id);
   if (index < 0) return;
   const [tab] = tabs.splice(index, 1);
+  denyPendingPermissions(pendingPermissionRequests.cancelForTab(id));
   const wasActive = activeTabId === id;
   if (!tab.incognito && tab.url) recentlyClosed.unshift({ url: tab.url, title: tab.title });
   if (tab.view) {
@@ -568,6 +585,7 @@ function closeTab(id: string) {
 function suspendTab(tab: Tab) {
   const view = tab.view;
   if (!view) return;
+  denyPendingPermissions(pendingPermissionRequests.cancelForTab(tab.id));
   view.setVisible(false);
   try { mainWindow?.contentView.removeChildView(view); } catch { /* already detached */ }
   tab.view = null;
@@ -649,7 +667,10 @@ function createWindow() {
   mainWindow.on('maximize', applyContentViewVisibility);
   mainWindow.on('unmaximize', applyContentViewVisibility);
   mainWindow.on('close', () => persistSession());
-  mainWindow.on('closed', () => { mainWindow = null; });
+  mainWindow.on('closed', () => {
+    denyPendingPermissions(pendingPermissionRequests.drain());
+    mainWindow = null;
+  });
 
   if (process.env.ELECTRON_RENDERER_URL) void mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL);
   else void mainWindow.loadFile(join(__dirname, '../renderer/index.html'));
@@ -685,9 +706,8 @@ ipcMain.on('browser:set-content-bounds', (_event, bounds: ContentBounds) => {
 });
 ipcMain.handle('permissions:respond', (_event, payload: { id?: string; allowed?: boolean }) => {
   if (!payload?.id || typeof payload.allowed !== 'boolean') return false;
-  const request = pendingPermissionRequests.get(payload.id);
+  const request = pendingPermissionRequests.take(payload.id);
   if (!request) return false;
-  pendingPermissionRequests.delete(payload.id);
   database.settings.sitePermissions[request.origin] = {
     ...database.settings.sitePermissions[request.origin],
     [request.permission]: payload.allowed
@@ -1408,6 +1428,9 @@ app.whenReady().then(async () => {
   if (!hasSingleInstanceLock) return;
   database = loadDatabase();
   tabSuspensionTimer = setInterval(suspendInactiveTabs, 30_000);
+  permissionRequestSweepTimer = setInterval(() => {
+    denyPendingPermissions(pendingPermissionRequests.expire(Date.now()));
+  }, 15_000);
   discordPresence.sync(database.settings);
   nativeTheme.themeSource = database.settings.theme;
   // Make Umbrella visible in Windows' Default apps chooser before the user asks
@@ -1424,8 +1447,8 @@ app.whenReady().then(async () => {
 app.on('before-quit', () => {
   if (tabSuspensionTimer) clearInterval(tabSuspensionTimer);
   if (blockedRequestUpdateTimer) clearTimeout(blockedRequestUpdateTimer);
-  for (const request of pendingPermissionRequests.values()) request.callback(false);
-  pendingPermissionRequests.clear();
+  if (permissionRequestSweepTimer) clearInterval(permissionRequestSweepTimer);
+  denyPendingPermissions(pendingPermissionRequests.drain());
   persistSession();
   void discordPresence.dispose();
 });

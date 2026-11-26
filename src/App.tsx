@@ -47,7 +47,10 @@ export default function App() {
     const offFocus = window.umbrella.onFocusAddress(() => window.dispatchEvent(new Event('umbrella:focus-address')));
     const offFind = window.umbrella.onFindRequest(() => setFindOpen(true));
     const offPermission = window.umbrella.onPermissionRequest((request) => setPermissionRequest(request));
-    return () => { offFocus(); offFind(); offPermission(); };
+    const offPermissionCancelled = window.umbrella.onPermissionCancelled((ids) => {
+      setPermissionRequest((current) => current && ids.includes(current.id) ? null : current);
+    });
+    return () => { offFocus(); offFind(); offPermission(); offPermissionCancelled(); };
   }, []);
 
   useEffect(() => {
