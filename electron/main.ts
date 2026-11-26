@@ -1415,13 +1415,14 @@ ipcMain.handle('window:action', (_event, action: string) => {
 
 app.on('second-instance', (_event, commandLine) => {
   const externalUrl = commandLine.find((argument) => isSafeWebUrl(argument));
-  if (!externalUrl) return;
+  // Launching Umbrella while it is already running must bring the existing window
+  // forward even when the second launch carries no URL.
   if (mainWindow && !mainWindow.isDestroyed()) {
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.show();
     mainWindow.focus();
   }
-  navigate(externalUrl);
+  if (externalUrl) navigate(externalUrl);
 });
 
 app.whenReady().then(async () => {
