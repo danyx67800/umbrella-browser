@@ -14,7 +14,7 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
-    "test": "node --experimental-strip-types --test electron/bookmarks.test.ts electron/navigation.test.ts electron/browser-import.test.ts electron/discord-presence.test.ts electron/tab-suspension.test.ts electron/pending-permissions.test.ts",
+    "test": "node --experimental-strip-types --test electron/bookmarks.test.ts electron/navigation.test.ts electron/browser-import.test.ts electron/discord-presence.test.ts electron/tab-suspension.test.ts electron/pending-permissions.test.ts electron/updates.test.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "dist": "npm run build && electron-builder --win nsis portable --x64"
   },
@@ -22,6 +22,7 @@
     "@ghostery/adblocker-electron": "^2.20.3",
     "@xhayper/discord-rpc": "^1.5.1",
     "cross-fetch": "^4.1.0",
+    "electron-updater": "^6.8.11",
     "lucide-react": "^1.78.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1"
@@ -40,6 +41,13 @@
   "build": {
     "appId": "com.umbrella.browser",
     "productName": "Umbrella",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "perosss03-spec",
+        "repo": "umbrella-browser"
+      }
+    ],
     "directories": {
       "output": "release"
     },

@@ -1,5 +1,6 @@
 import type { BookmarkImportResult, BrowserImportResult, BrowserState, DefaultBrowserResult, ImportBrowserInfo, PermissionRequest } from '../../electron/preload';
 import type { AppSettings, SitePermissionName } from '../../electron/storage';
+import type { UpdateState } from '../../electron/updates';
 
 declare global {
   interface Window {
@@ -37,6 +38,10 @@ declare global {
       setDefaultBrowser: () => Promise<DefaultBrowserResult>;
       checkDefaultBrowser: () => Promise<DefaultBrowserResult>;
       openDiscordDeveloperPortal: () => Promise<boolean>;
+      getUpdateState: () => Promise<UpdateState>;
+      checkForUpdates: () => Promise<UpdateState>;
+      installUpdate: () => Promise<boolean>;
+      onUpdateState: (callback: (state: UpdateState) => void) => () => void;
       scanImportSources: () => Promise<ImportBrowserInfo[]>;
       chooseCustomImportSource: () => Promise<ImportBrowserInfo | null>;
       importBrowserProfile: (browserId: string, profileId: string, options: { bookmarks: boolean; history: boolean }) => Promise<BrowserImportResult>;

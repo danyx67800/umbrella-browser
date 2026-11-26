@@ -19,6 +19,8 @@ import { isSafeWebUrl, resolveNavigation } from './navigation';
 import type { AppSettings } from './storage';
 import { discoverBrowserProfiles, importBrowserProfile, registerCustomBrowserProfile } from './browser-import';
 import { PendingPermissionRegistry } from './pending-permissions';
+import { autoUpdater } from 'electron-updater';
+import { UpdateController, type AutoUpdaterLike } from './updates';
 
 app.setAppUserModelId('com.umbrella.browser');
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
@@ -27,6 +29,20 @@ if (!hasSingleInstanceLock) app.quit();
 const DEFAULT_PARTITION = 'persist:umbrella';
 const execFileAsync = promisify(execFile);
 const discordPresence = new DiscordPresenceController();
+// electron-updater types its emitter with literal event names; the controller only
+// needs the structural subset it drives, and tests replace it with a fake.
+const updateController = new UpdateController({
+  updater: autoUpdater as unknown as AutoUpdaterLike,
+  environment: {
+    isPackaged: app.isPackaged,
+    platform: process.platform,
+    portable: !!process.env.PORTABLE_EXECUTABLE_DIR
+  },
+  currentVersion: app.getVersion(),
+  onChange: (state) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('updates:state', state);
+  }
+});
 type Tab = {
   id: string;
   title: string;
@@ -1406,6 +1422,10 @@ ipcMain.handle('bookmarks:import', async () => {
   }
 });
 
+ipcMain.handle('updates:get-state', () => updateController.getState());
+ipcMain.handle('updates:check', () => updateController.check());
+ipcMain.handle('updates:install', () => updateController.install());
+
 ipcMain.handle('window:action', (_event, action: string) => {
   if (!mainWindow) return;
   if (action === 'minimize') mainWindow.minimize();
@@ -1440,6 +1460,8 @@ app.whenReady().then(async () => {
   configureSession(DEFAULT_PARTITION, false);
   await restoreInstalledExtensions();
   createWindow();
+  // Look for a new GitHub release once the window exists, without blocking startup.
+  void updateController.check();
   // Do not hold the browser startup while filter lists are downloaded on first run.
   void syncAdBlocker();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
