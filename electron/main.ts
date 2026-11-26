@@ -21,6 +21,7 @@ import { discoverBrowserProfiles, importBrowserProfile, registerCustomBrowserPro
 import { PendingPermissionRegistry } from './pending-permissions';
 import { autoUpdater } from 'electron-updater';
 import { UpdateController, type AutoUpdaterLike } from './updates';
+import { buildReleaseApiUrls } from './update-assets';
 
 app.setAppUserModelId('com.umbrella.browser');
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
@@ -29,6 +30,24 @@ if (!hasSingleInstanceLock) app.quit();
 const DEFAULT_PARTITION = 'persist:umbrella';
 const execFileAsync = promisify(execFile);
 const discordPresence = new DiscordPresenceController();
+// Releases are allowed to publish the installer as `Umbrella.setup.0.4.4.exe`,
+// `Umbrella Setup 0.4.4.exe` or the canonical dashed name: the asset list tells the
+// updater which spelling exists, and the canonical name stays the fallback.
+async function fetchReleaseAssetNames(version: string): Promise<string[]> {
+  for (const url of buildReleaseApiUrls(version)) {
+    const response = await fetch(url, {
+      headers: { 'User-Agent': 'Umbrella-Updater', Accept: 'application/vnd.github+json' }
+    });
+    if (response.status === 404) continue;
+    if (!response.ok) throw new Error(`GitHub ha risposto ${response.status}.`);
+    const release = await response.json() as { assets?: Array<{ name?: unknown }> };
+    return (release.assets ?? [])
+      .map((asset) => (typeof asset?.name === 'string' ? asset.name : ''))
+      .filter(Boolean);
+  }
+  return [];
+}
+
 // electron-updater types its emitter with literal event names; the controller only
 // needs the structural subset it drives, and tests replace it with a fake.
 const updateController = new UpdateController({
@@ -39,6 +58,7 @@ const updateController = new UpdateController({
     portable: !!process.env.PORTABLE_EXECUTABLE_DIR
   },
   currentVersion: app.getVersion(),
+  resolveAssetNames: fetchReleaseAssetNames,
   onChange: (state) => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('updates:state', state);
   }

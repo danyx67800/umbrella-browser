@@ -10,12 +10,21 @@ import {
   type UpdateState
 } from './updates.ts';
 
+type FakeResult = {
+  isUpdateAvailable: boolean;
+  updateInfo?: { version?: string; files?: Array<{ url?: string }> };
+};
+
 class FakeUpdater {
   autoDownload = false;
   autoInstallOnAppQuit = false;
   checkCalls = 0;
+  downloadCalls = 0;
   checkError: unknown = null;
+  downloadError: unknown = null;
   installCalls: Array<{ isSilent?: boolean; isForceRunAfter?: boolean }> = [];
+  nextResult: FakeResult | null = { isUpdateAvailable: false, updateInfo: { version: '0.4.4' } };
+  lastDownloadUrls: string[] = [];
   private readonly listeners = new Map<string, Array<(...args: unknown[]) => void>>();
 
   on(event: string, listener: (...args: unknown[]) => void) {
@@ -32,11 +41,14 @@ class FakeUpdater {
   async checkForUpdates() {
     this.checkCalls += 1;
     if (this.checkError) throw this.checkError;
-    return {};
+    return this.nextResult;
   }
 
   async downloadUpdate() {
-    return {};
+    this.downloadCalls += 1;
+    this.lastDownloadUrls = (this.nextResult?.updateInfo?.files ?? []).map((file) => file.url ?? '');
+    if (this.downloadError) throw this.downloadError;
+    return [];
   }
 
   quitAndInstall(isSilent?: boolean, isForceRunAfter?: boolean) {
@@ -51,13 +63,18 @@ const environment = (overrides: Partial<UpdateEnvironment> = {}): UpdateEnvironm
   ...overrides
 });
 
-function createController(options: { environment?: UpdateEnvironment; currentVersion?: string } = {}) {
+function createController(options: {
+  environment?: UpdateEnvironment;
+  currentVersion?: string;
+  resolveAssetNames?: (version: string) => Promise<string[]>;
+} = {}) {
   const updater = new FakeUpdater();
   const changes: UpdateState[] = [];
   const controller = new UpdateController({
     updater: updater as unknown as AutoUpdaterLike,
     environment: options.environment ?? environment(),
     currentVersion: options.currentVersion ?? '0.4.4',
+    resolveAssetNames: options.resolveAssetNames,
     onChange: (state) => changes.push(state)
   });
   return { updater, controller, changes };
@@ -81,11 +98,11 @@ test('does not contact the updater when updates are unsupported', async () => {
   assert.equal(controller.install(), false);
 });
 
-test('enables background download for a packaged Windows build', () => {
+test('downloads only on request and installs on quit in a packaged Windows build', () => {
   const { updater, controller } = createController();
 
   assert.equal(controller.getState().status, 'idle');
-  assert.equal(updater.autoDownload, true);
+  assert.equal(updater.autoDownload, false);
   assert.equal(updater.autoInstallOnAppQuit, true);
 });
 
@@ -126,6 +143,74 @@ test('reports when no update is available', async () => {
   assert.equal(controller.getState().availableVersion, null);
 });
 
+test('downloads the asset the release publishes under the dotted name', async () => {
+  const requested: string[] = [];
+  const { updater, controller } = createController({
+    resolveAssetNames: async (version) => {
+      requested.push(version);
+      return ['Umbrella.setup.0.5.0.exe', 'Umbrella.setup.0.5.0.exe.blockmap'];
+    }
+  });
+  updater.nextResult = {
+    isUpdateAvailable: true,
+    updateInfo: { version: '0.5.0', files: [{ url: 'Umbrella-Setup-0.5.0.exe' }] }
+  };
+
+  await controller.check();
+
+  assert.deepEqual(requested, ['0.5.0']);
+  assert.equal(updater.downloadCalls, 1);
+  assert.deepEqual(updater.lastDownloadUrls, ['Umbrella.setup.0.5.0.exe']);
+  assert.equal(controller.getState().status, 'downloading');
+});
+
+test('falls back to the name from latest.yml when the release cannot be listed', async () => {
+  const { updater, controller } = createController({
+    resolveAssetNames: async () => { throw new Error('GitHub non raggiungibile.'); }
+  });
+  updater.nextResult = {
+    isUpdateAvailable: true,
+    updateInfo: { version: '0.5.0', files: [{ url: 'Umbrella-Setup-0.5.0.exe' }] }
+  };
+
+  await controller.check();
+
+  assert.equal(updater.downloadCalls, 1);
+  assert.deepEqual(updater.lastDownloadUrls, ['Umbrella-Setup-0.5.0.exe']);
+});
+
+test('keeps working when the release lists no assets at all', async () => {
+  const { updater, controller } = createController({ resolveAssetNames: async () => [] });
+  updater.nextResult = {
+    isUpdateAvailable: true,
+    updateInfo: { version: '0.5.0', files: [{ url: 'Umbrella-Setup-0.5.0.exe' }] }
+  };
+
+  await controller.check();
+
+  assert.equal(updater.downloadCalls, 1);
+  assert.deepEqual(updater.lastDownloadUrls, ['Umbrella-Setup-0.5.0.exe']);
+});
+
+test('does not download when the check reports no update', async () => {
+  const { updater, controller } = createController();
+  updater.nextResult = { isUpdateAvailable: false, updateInfo: { version: '0.4.4' } };
+
+  await controller.check();
+
+  assert.equal(updater.downloadCalls, 0);
+});
+
+test('does not download when the check returns nothing', async () => {
+  const { updater, controller } = createController();
+  updater.nextResult = null;
+
+  await controller.check();
+
+  assert.equal(updater.downloadCalls, 0);
+  assert.equal(controller.getState().status, 'checking');
+});
+
 test('surfaces updater failures and allows a retry', async () => {
   const { updater, controller } = createController();
 
@@ -140,11 +225,16 @@ test('surfaces updater failures and allows a retry', async () => {
   assert.equal(updater.checkCalls, 2);
 });
 
-test('keeps the available version when a download fails', async () => {
+test('reports a download failure without losing the available version', async () => {
   const { updater, controller } = createController();
+  updater.nextResult = {
+    isUpdateAvailable: true,
+    updateInfo: { version: '0.5.0', files: [{ url: 'Umbrella-Setup-0.5.0.exe' }] }
+  };
+  updater.downloadError = new Error('Download interrotto.');
 
-  updater.emit('update-available', { version: '0.5.0' });
-  updater.emit('error', new Error('Download interrotto.'));
+  await controller.check();
+  await new Promise((resolve) => setImmediate(resolve));
 
   const state = controller.getState();
   assert.equal(state.status, 'error');
@@ -178,11 +268,10 @@ test('clamps download percentages to the 0-100 range', () => {
 });
 
 test('hands copies of the state to listeners', async () => {
-  const { updater, controller, changes } = createController();
+  const { controller, changes } = createController();
 
   await controller.check();
   changes[0].status = 'downloaded';
 
   assert.equal(controller.getState().status, 'checking');
-  assert.equal(updater.installCalls.length, 0);
 });

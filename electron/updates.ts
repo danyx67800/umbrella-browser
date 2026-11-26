@@ -1,3 +1,5 @@
+import { rewriteUpdateInfoAssets } from './update-assets.ts';
+
 export type UpdateStatus =
   | 'disabled'
   | 'idle'
@@ -73,6 +75,10 @@ export function clampPercent(value: unknown): number | null {
 }
 
 type UpdateInfoLike = { version?: unknown; releaseName?: unknown; releaseNotes?: unknown };
+type UpdateCheckResultLike = {
+  isUpdateAvailable?: boolean;
+  updateInfo?: UpdateInfoLike & { files?: Array<{ url?: string }> };
+};
 
 function readUpdateInfo(info: unknown): Pick<UpdateState, 'availableVersion' | 'releaseName' | 'releaseNotes'> {
   if (!info || typeof info !== 'object') {
@@ -88,18 +94,22 @@ export type UpdateControllerOptions = {
   updater: AutoUpdaterLike;
   environment: UpdateEnvironment;
   currentVersion: string;
+  /** Lists the assets published in the GitHub release, so an alternative file name can be used. */
+  resolveAssetNames?: (version: string) => Promise<string[]>;
   onChange?: (state: UpdateState) => void;
 };
 
 export class UpdateController {
   private readonly updater: AutoUpdaterLike;
   private readonly unsupportedReason: string | null;
+  private readonly resolveAssetNames: ((version: string) => Promise<string[]>) | null;
   private readonly onChange: (state: UpdateState) => void;
   private state: UpdateState;
 
   constructor(options: UpdateControllerOptions) {
     this.updater = options.updater;
     this.unsupportedReason = getUnsupportedReason(options.environment);
+    this.resolveAssetNames = options.resolveAssetNames ?? null;
     this.onChange = options.onChange ?? (() => {});
     this.state = {
       status: this.unsupportedReason ? 'disabled' : 'idle',
@@ -112,9 +122,10 @@ export class UpdateController {
       unsupportedReason: this.unsupportedReason
     };
     if (this.unsupportedReason) return;
-    // Download in the background and install when the user restarts, so a long
-    // browsing session is never interrupted by the updater itself.
-    this.updater.autoDownload = true;
+    // The controller starts the download itself, once the file name from
+    // latest.yml has been matched against the assets the release publishes.
+    // Installation still waits for a restart the user asks for.
+    this.updater.autoDownload = false;
     this.updater.autoInstallOnAppQuit = true;
     this.bindUpdater();
   }
@@ -132,7 +143,15 @@ export class UpdateController {
     if (this.state.status === 'checking' || this.state.status === 'downloading') return this.getState();
     this.apply({ status: 'checking', error: null, percent: null });
     try {
-      await this.updater.checkForUpdates();
+      const result = await this.updater.checkForUpdates() as UpdateCheckResultLike | null;
+      // electron-updater returns updateInfo even when no update is available.
+      if (result?.isUpdateAvailable && result.updateInfo) {
+        await this.alignReleaseAssets(result.updateInfo);
+        // Fill the version here too, so the state does not depend on the event
+        // arriving before the promise resolves.
+        this.apply({ status: 'downloading', percent: 0, error: null, ...readUpdateInfo(result.updateInfo) });
+        void this.updater.downloadUpdate().catch((error) => this.fail(error));
+      }
     } catch (error) {
       this.fail(error);
     }
@@ -143,6 +162,20 @@ export class UpdateController {
     if (this.state.status !== 'downloaded') return false;
     this.updater.quitAndInstall(false, true);
     return true;
+  }
+
+  private async alignReleaseAssets(info: UpdateInfoLike & { files?: Array<{ url?: string }> }) {
+    if (!this.resolveAssetNames || typeof info.version !== 'string' || !info.version.trim()) return;
+    try {
+      const assets = await this.resolveAssetNames(info.version.trim());
+      if (!assets.length) return;
+      for (const change of rewriteUpdateInfoAssets(info, assets)) {
+        console.info('[Umbrella] Using release asset:', change);
+      }
+    } catch (error) {
+      // The canonical name from latest.yml is still what electron-updater tries.
+      console.warn('[Umbrella] Could not list the assets of the GitHub release:', error);
+    }
   }
 
   private bindUpdater() {
