@@ -1,6 +1,6 @@
 import {
-  app, BrowserWindow, WebContentsView, ipcMain, session, dialog, shell, nativeTheme, Notification, Menu, screen,
-  type DownloadItem, type Session, type MessageBoxOptions
+  app, BrowserWindow, WebContentsView, ipcMain, session, dialog, shell, nativeTheme, Notification, Menu, screen, clipboard,
+  type DownloadItem, type Session, type MessageBoxOptions, type MenuItemConstructorOptions
 } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
@@ -19,6 +19,7 @@ import { isSafeWebUrl, resolveNavigation } from './navigation';
 import type { AppSettings } from './storage';
 import { discoverBrowserProfiles, importBrowserProfile, registerCustomBrowserProfile } from './browser-import';
 import { PendingPermissionRegistry } from './pending-permissions';
+import { buildBrowserContextMenu, type BrowserContextMenuAction } from './context-menu';
 import { autoUpdater } from 'electron-updater';
 import { UpdateController, type AutoUpdaterLike } from './updates';
 import { buildReleaseApiUrls } from './update-assets';
@@ -30,9 +31,8 @@ if (!hasSingleInstanceLock) app.quit();
 const DEFAULT_PARTITION = 'persist:umbrella';
 const execFileAsync = promisify(execFile);
 const discordPresence = new DiscordPresenceController();
-// Releases are allowed to publish the installer as `Umbrella.setup.0.4.4.exe`,
-// `Umbrella Setup 0.4.4.exe` or the canonical dashed name: the asset list tells the
-// updater which spelling exists, and the canonical name stays the fallback.
+const pendingContextSavePaths = new Map<number, { url: string; filePath: string }>();
+// Releases may publish installer assets with different separators or spacing.
 async function fetchReleaseAssetNames(version: string): Promise<string[]> {
   for (const url of buildReleaseApiUrls(version)) {
     const response = await fetch(url, {
@@ -396,7 +396,8 @@ function addHistory(tab: Tab) {
   saveDatabase();
 }
 
-function handleDownload(partitionSession: Session, item: DownloadItem, isPrivate: boolean) {
+function handleDownload(partitionSession: Session, item: DownloadItem, isPrivate: boolean, savePathOverride?: string) {
+  if (savePathOverride) item.setSavePath(savePathOverride);
   const id = randomUUID();
   const record: DownloadRecord = {
     id,
@@ -412,7 +413,9 @@ function handleDownload(partitionSession: Session, item: DownloadItem, isPrivate
   emitState();
 
   const settings = database.settings;
-  if (settings.askDownloadLocation && !isPrivate) {
+  if (savePathOverride) {
+    record.savePath = savePathOverride;
+  } else if (settings.askDownloadLocation && !isPrivate) {
     const saveChoice = mainWindow && !mainWindow.isDestroyed()
       ? dialog.showSaveDialog(mainWindow, { defaultPath: record.filename })
       : dialog.showSaveDialog({ defaultPath: record.filename });
@@ -454,7 +457,12 @@ function configureSession(partition: string, isPrivate: boolean) {
     try { adBlocker.enableBlockingInSession(ses); } catch (error) { console.warn('[Umbrella] Could not enable ad blocking in session:', error); }
   }
 
-  ses.on('will-download', (_event, item) => handleDownload(ses, item, isPrivate));
+  ses.on('will-download', (_event, item, webContents) => {
+    const pending = webContents ? pendingContextSavePaths.get(webContents.id) : undefined;
+    const savePath = pending?.url === item.getURL() ? pending.filePath : undefined;
+    if (savePath && webContents) pendingContextSavePaths.delete(webContents.id);
+    handleDownload(ses, item, isPrivate, savePath);
+  });
   ses.setPermissionRequestHandler((webContents, permission, callback, details) => {
     const supportedPermission = sitePermissionNames.find((item) => item === permission);
     if (!supportedPermission || isPrivate) return callback(false);
@@ -503,6 +511,54 @@ function createPageView(tab: Tab): WebContentsView | null {
     else if (url.startsWith('mailto:')) void shell.openExternal(url);
     return { action: 'deny' };
   });
+  contents.on('context-menu', (event, params) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    event.preventDefault();
+
+    const linkURL = typeof params.linkURL === 'string' && isSafeWebUrl(params.linkURL) ? params.linkURL : null;
+    const imageURL = typeof params.srcURL === 'string' && isSafeWebUrl(params.srcURL) ? params.srcURL : null;
+    const menuItems = buildBrowserContextMenu({
+      canGoBack: contents.canGoBack(),
+      canGoForward: contents.canGoForward(),
+      hasImageContents: params.hasImageContents || params.mediaType === 'image',
+      imageURL,
+      isEditable: params.isEditable,
+      linkURL,
+      selectionText: params.selectionText
+    });
+    const actions: Record<BrowserContextMenuAction, () => void> = {
+      back: () => { if (contents.canGoBack()) contents.goBack(); },
+      'copy-image': () => contents.copyImageAt(params.x, params.y),
+      'copy-image-address': () => { if (imageURL) clipboard.writeText(imageURL); },
+      'copy-link': () => { if (linkURL) clipboard.writeText(linkURL); },
+      'copy-selection': () => {
+        if (params.isEditable) contents.copy();
+        else if (params.selectionText) clipboard.writeText(params.selectionText);
+      },
+      forward: () => { if (contents.canGoForward()) contents.goForward(); },
+      inspect: () => contents.inspectElement(params.x, params.y),
+      'open-image': () => { if (imageURL) createTab(imageURL, tab.incognito); },
+      'open-link': () => { if (linkURL) createTab(linkURL, tab.incognito); },
+      'open-link-incognito': () => { if (linkURL) createTab(linkURL, true); },
+      paste: () => contents.paste(),
+      print: () => contents.print({}, (success, failureReason) => {
+        if (!success) console.warn('[Umbrella] Could not print the page:', failureReason);
+      }),
+      reload: () => contents.reload(),
+      'save-image': () => { if (imageURL) saveContextUrlAs(contents, imageURL, 'Salva immagine con nome...'); },
+      'save-link': () => { if (linkURL) saveContextUrlAs(contents, linkURL, 'Salva link con nome...'); },
+      'save-page': () => savePageAs(contents),
+      'select-all': () => contents.selectAll(),
+      cut: () => contents.cut()
+    };
+    const template: MenuItemConstructorOptions[] = menuItems.map((item) => {
+      if ('type' in item) return item;
+      const { action, ...menuItem } = item;
+      return { ...menuItem, click: actions[action] };
+    });
+    Menu.buildFromTemplate(template).popup({ window: mainWindow });
+  });
+  contents.once('destroyed', () => pendingContextSavePaths.delete(contents.id));
   contents.on('will-navigate', (event, url) => {
     if (url.startsWith('mailto:')) { event.preventDefault(); void shell.openExternal(url); return; }
     if (!isSafeWebUrl(url) && url !== 'about:blank') event.preventDefault();
@@ -543,6 +599,43 @@ function createPageView(tab: Tab): WebContentsView | null {
   });
   void ses;
   return view;
+}
+
+function saveContextUrlAs(contents: Electron.WebContents, url: string, title: string) {
+  const filename = new URL(url).pathname.split('/').pop() || 'download';
+  const options = { title, defaultPath: filename };
+  const saveChoice = mainWindow && !mainWindow.isDestroyed()
+    ? dialog.showSaveDialog(mainWindow, options)
+    : dialog.showSaveDialog(options);
+  void saveChoice.then((choice) => {
+    if (choice.canceled || !choice.filePath || contents.isDestroyed()) return;
+    pendingContextSavePaths.set(contents.id, { url, filePath: choice.filePath });
+    try {
+      contents.downloadURL(url);
+    } catch (error) {
+      pendingContextSavePaths.delete(contents.id);
+      console.warn('[Umbrella] Could not start the context-menu download:', error);
+    }
+  }).catch((error) => console.warn('[Umbrella] Could not select a download location:', error));
+}
+
+function savePageAs(contents: Electron.WebContents) {
+  const options = {
+    title: 'Salva pagina con nome...',
+    defaultPath: 'pagina.html',
+    filters: [{ name: 'Pagina web', extensions: ['html'] }]
+  };
+  const saveChoice = mainWindow && !mainWindow.isDestroyed()
+    ? dialog.showSaveDialog(mainWindow, options)
+    : dialog.showSaveDialog(options);
+  void saveChoice.then(async (choice) => {
+    if (choice.canceled || !choice.filePath || contents.isDestroyed()) return;
+    try {
+      await contents.savePage(choice.filePath, 'HTMLComplete');
+    } catch (error) {
+      console.warn('[Umbrella] Could not save the page:', error);
+    }
+  }).catch((error) => console.warn('[Umbrella] Could not select a page save location:', error));
 }
 
 function loadTab(tab: Tab) {
