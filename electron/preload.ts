@@ -98,6 +98,11 @@ const api = {
     ipcRenderer.on('permissions:request', handler);
     return () => ipcRenderer.removeListener('permissions:request', handler);
   },
+  onPermissionCancelled: (callback: (ids: string[]) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, ids: string[]) => callback(ids);
+    ipcRenderer.on('permissions:cancelled', handler);
+    return () => ipcRenderer.removeListener('permissions:cancelled', handler);
+  },
   respondToPermission: (id: string, allowed: boolean) =>
     ipcRenderer.invoke('permissions:respond', { id, allowed }) as Promise<boolean>,
   setSitePermission: (origin: string, permission: SitePermissionName, allowed: boolean | null) =>

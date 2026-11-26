@@ -9,6 +9,7 @@ declare global {
       onFocusAddress: (callback: () => void) => () => void;
       onFindRequest: (callback: () => void) => () => void;
       onPermissionRequest: (callback: (request: PermissionRequest) => void) => () => void;
+      onPermissionCancelled: (callback: (ids: string[]) => void) => () => void;
       respondToPermission: (id: string, allowed: boolean) => Promise<boolean>;
       setSitePermission: (origin: string, permission: SitePermissionName, allowed: boolean | null) => Promise<boolean>;
       setSiteAdBlockExcluded: (origin: string, excluded: boolean) => Promise<boolean>;
