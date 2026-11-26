@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { AppSettings, Bookmark, SitePermissionName, Visit } from './storage';
+import type { UpdateState } from './updates';
 
 export type TabInfo = {
   id: string;
@@ -134,6 +135,14 @@ const api = {
   setDefaultBrowser: () => ipcRenderer.invoke('browser:set-default') as Promise<DefaultBrowserResult>,
   checkDefaultBrowser: () => ipcRenderer.invoke('browser:check-default') as Promise<DefaultBrowserResult>,
   openDiscordDeveloperPortal: () => ipcRenderer.invoke('discord:open-developer-portal') as Promise<boolean>,
+  getUpdateState: () => ipcRenderer.invoke('updates:get-state') as Promise<UpdateState>,
+  checkForUpdates: () => ipcRenderer.invoke('updates:check') as Promise<UpdateState>,
+  installUpdate: () => ipcRenderer.invoke('updates:install') as Promise<boolean>,
+  onUpdateState: (callback: (state: UpdateState) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, state: UpdateState) => callback(state);
+    ipcRenderer.on('updates:state', handler);
+    return () => ipcRenderer.removeListener('updates:state', handler);
+  },
   scanImportSources: () => ipcRenderer.invoke('browser:scan-import-sources') as Promise<ImportBrowserInfo[]>,
   chooseCustomImportSource: () => ipcRenderer.invoke('browser:choose-custom-import-source') as Promise<ImportBrowserInfo | null>,
   importBrowserProfile: (browserId: string, profileId: string, options: { bookmarks: boolean; history: boolean }) =>
